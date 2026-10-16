@@ -1,0 +1,21 @@
+# Runtime artifacts
+logs/
+data/landing/*
+data/bronze/*
+!data/landing/.gitkeep
+!data/bronze/.gitkeep
+
+# Local config
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
