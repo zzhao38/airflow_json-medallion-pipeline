@@ -1,6 +1,0 @@
-[
-    {"id": 1, "name": "Product_A", "category": "Electronics", "price": 500, "quantity": 10},
-    {"id": 2, "name": "Product_B", "category": "Clothing", "price": 30, "quantity": 20},
-    {"id": 3, "name": "Product_C", "category": "Electronics", "price": 800, "quantity": 5},
-    {"id": 4, "name": "Product_D", "category": "Clothing", "price": 50, "quantity": 15}
-]
