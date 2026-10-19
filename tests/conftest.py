@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import sys
 from collections.abc import Iterator
@@ -13,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DAGS_DIR = REPO_ROOT / "dags"
 PIPELINE_DIR = DAGS_DIR / "json_medallion_pipeline"
 TEST_DB_NAME = "warehouse_test"
-REQUIRED_SAMPLES = ("products.json", "users.json", "store.json")
+REQUIRED_SAMPLES = ("orders.json", "products.json")
 
 
 def load_dag_module(path: Path, name: str):
@@ -49,6 +50,17 @@ def pipeline_module():
 @pytest.fixture(scope="session")
 def samples_dir() -> Path:
     return REPO_ROOT / "data" / "samples"
+
+
+@pytest.fixture(scope="session")
+def scenarios_dir(samples_dir) -> Path:
+    return samples_dir / "scenarios"
+
+
+@pytest.fixture(scope="session")
+def manifest(scenarios_dir) -> dict:
+    """data/samples/scenarios/manifest.json: scenario name -> file, source and expected outcome."""
+    return json.loads((scenarios_dir / "manifest.json").read_text())
 
 
 @pytest.fixture(scope="session")

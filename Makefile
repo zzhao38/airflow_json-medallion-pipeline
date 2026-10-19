@@ -15,7 +15,7 @@ help: ## Show available targets
 
 init: ## Create .env, runtime dirs, build image, migrate Airflow metadata DB
 	@test -f .env || cp .env.example .env
-	@mkdir -p logs data/landing data/bronze
+	@mkdir -p logs data/landing data/bronze data/quarantine
 	$(COMPOSE) build
 	$(COMPOSE) up airflow-init
 
@@ -42,7 +42,7 @@ seed: ## Copy sample JSON into data/landing if present (never overwrites; no-op 
 			[ -e "data/landing/$$(basename "$$f")" ] || cp "$$f" data/landing/ || exit 1; \
 		done; \
 	else \
-		echo "No samples in data/samples/. Supply products.json, users.json and store.json in data/landing/ before triggering the DAG."; \
+		echo "No samples in data/samples/. Supply orders.json and products.json in data/landing/ before triggering the DAG."; \
 	fi
 	@ls -1 data/landing
 
@@ -71,9 +71,9 @@ test-unit: ## Unit + DAG-integrity tests (no warehouse needed)
 test-integration: ## End-to-end SQL tests in a throwaway warehouse_test DB (skipped without data/samples/*.json)
 	$(COMPOSE) run --rm airflow-cli python -m pytest -m integration /opt/airflow/tests
 
-clean: ## Remove landed/bronze files and logs (keeps DB volumes)
-	rm -rf data/landing/*.json data/bronze/* logs/*
+clean: ## Remove landed/bronze/quarantine files and logs (keeps DB volumes)
+	rm -rf data/landing/*.json data/bronze/* data/quarantine/* logs/*
 
 reset: ## Full teardown including DB volumes
 	$(COMPOSE) down -v --remove-orphans
-	rm -rf data/landing/*.json data/bronze/* logs/*
+	rm -rf data/landing/*.json data/bronze/* data/quarantine/* logs/*

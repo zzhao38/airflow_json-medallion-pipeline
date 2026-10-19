@@ -1,135 +1,146 @@
-"""Ingestion helper tests: the plain-Python helpers defined in the scheduled DAG file."""
+"""Unit tests for the pure bronze/release helpers in the DAG file (no database, no sample files)."""
+import copy
+import hashlib
 import json
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-# (landing file, record_path) per source, as hard-coded in the DAG.
-SPECS = {
-    "products": ("products.json", ()),
-    "users": ("users.json", ("users",)),
-    "store_catalog": ("store.json", ("store",)),
-}
-SOURCE_NAMES = list(SPECS)
-
-# Minimal documents in each source's shape; unit tests must not depend on data/samples/.
-DOCS = {
-    "products.json": [{"id": 1}, {"id": 2}],
-    "users.json": {"users": [{"id": 1}, {"id": 2}, {"id": 3}]},
-    "store.json": {"store": {"name": "SuperMart", "products": []}},
-}
-
-
-@pytest.fixture
-def landing_dir(tmp_path: Path) -> Path:
-    landing = tmp_path / "landing"
-    landing.mkdir()
-    for file_name, doc in DOCS.items():
-        (landing / file_name).write_text(json.dumps(doc))
-    return landing
-
-
-@pytest.fixture
-def impl(pipeline_module):
-    return SimpleNamespace(
-        extract_records=pipeline_module.extract_records,
-        sha256_of_file=pipeline_module.sha256_of_file,
-        land=lambda name, landing, bronze, ds: pipeline_module.land_file(
-            name, SPECS[name][0], SPECS[name][1], landing, bronze, ds
-        ),
-        rows=lambda landed, name, ds, run_id: pipeline_module.bronze_rows(
-            landed, SPECS[name][1], ds, run_id
-        ),
-    )
-
-
-class TestExtractRecords:
-    def test_flat_list(self, impl):
-        doc = [{"id": 1}, {"id": 2}]
-        assert impl.extract_records(doc, ()) == doc
-
-    def test_nested_list(self, impl):
-        doc = {"users": [{"id": 1}, {"id": 2}]}
-        assert impl.extract_records(doc, ("users",)) == doc["users"]
-
-    def test_single_object_becomes_one_record(self, impl):
-        doc = {"store": {"name": "SuperMart"}}
-        assert impl.extract_records(doc, ("store",)) == [{"name": "SuperMart"}]
-
-    def test_missing_path_raises(self, impl):
-        with pytest.raises(ValueError, match="record_path"):
-            impl.extract_records({"users": []}, ("customers",))
-
-    def test_non_object_records_raise(self, impl):
-        with pytest.raises(ValueError, match="non-object"):
-            impl.extract_records([1, 2, 3], ())
-
-    def test_scalar_node_raises(self, impl):
-        with pytest.raises(ValueError, match="list or object"):
-            impl.extract_records({"n": 5}, ("n",))
-
-
-class TestLandFile:
-    def test_lands_into_partition_and_hashes(self, impl, tmp_path: Path, landing_dir: Path):
-        bronze = tmp_path / "bronze"
-
-        landed = impl.land("users", landing_dir, bronze, "2024-01-01")
-
-        dest = bronze / "users" / "dt=2024-01-01" / "users.json"
-        assert Path(landed.bronze_path) == dest
-        assert dest.is_file()
-        assert landed.sha256 == impl.sha256_of_file(landing_dir / "users.json")
-        assert (landed.source_name, landed.source_file) == ("users", "users.json")
-
-    def test_store_catalog_keeps_landing_file_name(self, impl, tmp_path: Path, landing_dir: Path):
-        landed = impl.land("store_catalog", landing_dir, tmp_path, "2024-01-01")
-        assert Path(landed.bronze_path) == tmp_path / "store_catalog" / "dt=2024-01-01" / "store.json"
-
-    def test_rerun_overwrites_partition(self, impl, tmp_path: Path, landing_dir: Path):
-        first = impl.land("products", landing_dir, tmp_path, "2024-01-01")
-        second = impl.land("products", landing_dir, tmp_path, "2024-01-01")
-        assert first == second
-        assert len(list((tmp_path / "products" / "dt=2024-01-01").iterdir())) == 1
-
-    def test_missing_landing_file(self, impl, tmp_path: Path):
-        with pytest.raises(FileNotFoundError):
-            impl.land("products", tmp_path, tmp_path / "bronze", "2024-01-01")
-
-    def test_invalid_json_is_rejected_before_landing(self, impl, tmp_path: Path):
-        landing = tmp_path / "landing"
-        landing.mkdir()
-        (landing / "products.json").write_text("{not json")
-        with pytest.raises(json.JSONDecodeError):
-            impl.land("products", landing, tmp_path / "bronze", "2024-01-01")
-        assert not (tmp_path / "bronze").exists()
-
-    def test_wrong_shape_is_rejected_before_landing(self, impl, tmp_path: Path):
-        landing = tmp_path / "landing"
-        landing.mkdir()
-        (landing / "users.json").write_text('{"customers": []}')
-        with pytest.raises(ValueError, match="record_path"):
-            impl.land("users", landing, tmp_path / "bronze", "2024-01-01")
-        assert not (tmp_path / "bronze").exists()
-
-
-class TestBronzeRows:
-    @pytest.mark.parametrize("name", SOURCE_NAMES)
-    def test_one_row_per_record(self, impl, tmp_path: Path, landing_dir: Path, name: str):
-        landed = impl.land(name, landing_dir, tmp_path, "2024-01-01")
-        rows = impl.rows(landed, name, "2024-01-01", "manual__test")
-
-        assert rows, "sample must yield at least one record"
-        for idx, row in enumerate(rows):
-            ds, record_index, payload, source_file, sha, run_id = row
-            assert (ds, record_index, source_file, sha, run_id) == (
-                "2024-01-01", idx, SPECS[name][0], landed.sha256, "manual__test"
-            )
-            assert isinstance(json.loads(payload), dict)
-
-    def test_record_counts_per_shape(self, impl, tmp_path: Path, landing_dir: Path):
-        counts = {
-            name: len(impl.rows(impl.land(name, landing_dir, tmp_path, "2024-01-01"), name, "2024-01-01", "r"))
-            for name in SOURCE_NAMES
+ORDERS_DOC = {
+    "source": "order_service",
+    "batch_id": "b1",
+    "records": [
+        {
+            "order_id": "O1",
+            "ordered_at": "2026-09-01T10:15:00Z",
+            "customer": {"customer_id": "C1", "name": "A"},
+            "shipping": {"city": "X", "state": "IL", "method": "ground"},
+            "items": [{"order_item_id": "OI-1", "product_id": "P1", "quantity": 1, "unit_price": 9.99}],
         }
-        assert counts == {"products": 2, "users": 3, "store_catalog": 1}
+    ],
+}
+PRODUCTS_DOC = {
+    "source": "catalog_service",
+    "batch_id": "p1",
+    "records": [
+        {
+            "product_id": "P1",
+            "details": {"sku": "S1", "name": "Drill", "brand": "Acme"},
+            "category": {"id": "TOOLS", "path": ["Tools", "Power Tools"]},
+            "prices": [{"currency": "USD", "amount": 9.99, "is_current": True}],
+        }
+    ],
+}
+
+
+def write(tmp_path, name, content):
+    path = tmp_path / name
+    path.write_bytes(content if isinstance(content, bytes) else json.dumps(content).encode())
+    return path
+
+
+def test_accepted_file_exposes_envelope_fields(pipeline_module, tmp_path):
+    path = write(tmp_path, "orders.json", ORDERS_DOC)
+    check = pipeline_module.inspect_file(path, pipeline_module.ORDERS)
+
+    assert check.status == "ACCEPTED" and check.reason is None
+    assert check.record_count == 1 and check.records == ORDERS_DOC["records"]
+    assert (check.batch_id, check.envelope_source) == ("b1", "order_service")
+    assert check.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert check.size == len(path.read_bytes()) and check.content == path.read_bytes()
+
+
+@pytest.mark.parametrize(("spec_name", "doc"), [("ORDERS", ORDERS_DOC), ("PRODUCTS", PRODUCTS_DOC)])
+def test_schemas_accept_the_documented_shapes(pipeline_module, tmp_path, spec_name, doc):
+    spec = getattr(pipeline_module, spec_name)
+    check = pipeline_module.inspect_file(write(tmp_path, spec.filename, doc), spec)
+    assert (check.status, check.reason, check.record_count) == ("ACCEPTED", None, 1)
+
+
+def test_missing_file_raises(pipeline_module, tmp_path):
+    with pytest.raises(FileNotFoundError):
+        pipeline_module.inspect_file(tmp_path / "nope.json", pipeline_module.ORDERS)
+
+
+def test_invalid_json_is_quarantined(pipeline_module, tmp_path):
+    check = pipeline_module.inspect_file(write(tmp_path, "orders.json", b"{not json"), pipeline_module.ORDERS)
+    assert check.status == "QUARANTINED"
+    assert check.reason.startswith("invalid JSON: ")
+    assert check.record_count is None and check.records == []
+    assert (check.batch_id, check.envelope_source) == (None, None)
+
+
+def test_wrong_envelope_source_is_quarantined_but_still_reports_it(pipeline_module, tmp_path):
+    doc = {**ORDERS_DOC, "source": "payment_service"}
+    check = pipeline_module.inspect_file(write(tmp_path, "orders.json", doc), pipeline_module.ORDERS)
+    assert check.status == "QUARANTINED"
+    assert check.reason.startswith("schema orders.v1: $.source: ")
+    assert (check.batch_id, check.envelope_source) == ("b1", "payment_service")
+
+
+def test_wrong_type_is_quarantined_with_json_path(pipeline_module, tmp_path):
+    doc = copy.deepcopy(ORDERS_DOC)
+    doc["records"][0]["items"][0]["quantity"] = "two"
+    check = pipeline_module.inspect_file(write(tmp_path, "orders.json", doc), pipeline_module.ORDERS)
+
+    assert check.status == "QUARANTINED"
+    assert check.reason.startswith("schema orders.v1: $.records[0].items[0].quantity: ")
+    assert check.record_count == 1  # parseable, so the count is still known
+
+
+def test_business_rule_violation_is_not_a_file_level_error(pipeline_module, tmp_path):
+    """quantity <= 0 is rejected per order in silver; the file contract only checks types."""
+    doc = copy.deepcopy(ORDERS_DOC)
+    doc["records"][0]["items"][0]["quantity"] = -1
+    check = pipeline_module.inspect_file(write(tmp_path, "orders.json", doc), pipeline_module.ORDERS)
+    assert check.status == "ACCEPTED"
+
+
+def test_non_dict_document_is_quarantined_without_envelope_fields(pipeline_module, tmp_path):
+    check = pipeline_module.inspect_file(write(tmp_path, "products.json", []), pipeline_module.PRODUCTS)
+    assert check.status == "QUARANTINED"
+    assert (check.batch_id, check.envelope_source) == (None, None)
+
+
+def test_no_records_is_quarantined(pipeline_module, tmp_path):
+    doc = {**PRODUCTS_DOC, "records": []}
+    check = pipeline_module.inspect_file(write(tmp_path, "products.json", doc), pipeline_module.PRODUCTS)
+    assert (check.status, check.record_count) == ("QUARANTINED", 0)
+    assert check.reason  # either a schema minItems violation or "no records"
+
+
+def test_first_error_is_deterministic(pipeline_module):
+    schema = {"type": "object", "properties": {"b": {"type": "integer"}, "a": {"type": "integer"}}}
+    reason = pipeline_module.first_schema_error({"b": "x", "a": "y"}, schema, "t.v1")
+    assert reason.startswith("schema t.v1: $.a: ")
+    assert pipeline_module.first_schema_error({"a": 1, "b": 2}, schema, "t.v1") is None
+
+
+def test_zone_path_contains_sanitized_run_id(pipeline_module, tmp_path):
+    run_id = "manual__2026-10-19T00:00:00+00:00"
+    path = pipeline_module.zone_path(tmp_path / "bronze", "orders", "2026-10-19", run_id, "orders.json")
+
+    assert path.parts[-4:-1] == ("orders", "dt=2026-10-19", "manual__2026-10-19T00_00_00_00_00")
+    assert path.name == "orders.json" and ":" not in str(path) and "+" not in str(path)
+    quarantine = pipeline_module.zone_path(tmp_path / "quarantine", "orders", "2026-10-19", run_id, "orders.json")
+    assert "quarantine" in quarantine.parts
+
+
+def test_expected_rows_warning(pipeline_module):
+    warn = pipeline_module.expected_rows_warning
+    assert warn(None, 10) is None  # first delivery
+    assert warn(10, 13) is None  # +30% is inside the tolerance
+    assert warn(10, 7) is None
+    assert "+40%" in warn(10, 14)
+    assert "-50%" in warn(10, 5)
+
+
+def test_decide_release(pipeline_module):
+    decide = pipeline_module.decide_release
+    all_ok = {"orders": True, "products": True}
+    assert decide(all_ok, True) == ("PUBLISHED", "")
+
+    status, reason = decide({**all_ok, "orders": False}, True)
+    assert status == "HELD" and "orders" in reason
+
+    status, reason = decide(all_ok, False)
+    assert status == "HELD" and "gold" in reason

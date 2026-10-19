@@ -2,8 +2,10 @@
 logs/
 data/landing/*
 data/bronze/*
+data/quarantine/*
 !data/landing/.gitkeep
 !data/bronze/.gitkeep
+!data/quarantine/.gitkeep
 
 # Local config
 .env

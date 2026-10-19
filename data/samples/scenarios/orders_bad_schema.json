@@ -1,0 +1,7 @@
+{
+  "source": "order_service",
+  "batch_id": "20260903_orders",
+  "records": [
+    {"order_id":"O2001","ordered_at":"2026-09-03T09:00:00Z","customer":{"customer_id":"C001","name":"Jordan Lee"},"shipping":{"city":"Evanston","state":"IL","method":"ground"},"items":[{"order_item_id":"OI-2001-1","product_id":"P100","quantity":"two","unit_price":49.99}]}
+  ]
+}

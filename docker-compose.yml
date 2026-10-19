@@ -68,7 +68,7 @@ services:
     command:
       - -c
       - |
-        mkdir -p /opt/airflow/logs /opt/airflow/data/landing /opt/airflow/data/bronze
+        mkdir -p /opt/airflow/logs /opt/airflow/data/landing /opt/airflow/data/bronze /opt/airflow/data/quarantine
         exec /entrypoint airflow version
     environment:
       <<: *airflow-common-env

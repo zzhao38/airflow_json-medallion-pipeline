@@ -1,43 +1,54 @@
--- Row-level lineage: resolve any gold row back to the raw bronze record(s) it came from.
--- Views (not tables), so they survive the gold TRUNCATE + INSERT refreshes and are always current.
--- Every view exposes the gold key columns plus the bronze evidence:
---   source_table, logical_date, record_index, source_file, file_sha256, dag_run_id, payload.
--- Per-row models join on their own (bronze_logical_date, bronze_record_index); only the
--- category aggregate expands bronze_lineage (JSONB array) into one row per contributing record.
+-- Trace views: gold row -> release -> bronze arrival + raw payload (the "why is this number X" path).
+-- Grain: same as the gold table each view wraps (aggregates: one row per contributing bronze record).
+-- Read-only; nothing here is written by the DAG.
+-- Lineage: join on (bronze_arrival_id, bronze_record_index) -> bronze.record / bronze.arrival.
 
-CREATE OR REPLACE VIEW gold.v_trace_product_total_value AS
-SELECT g.product_id, g.name, g.category, g.total_value,
-       'raw_products'::TEXT AS source_table,
-       b.logical_date, b.record_index, b.source_file, b.file_sha256, b.dag_run_id, b.payload
-FROM gold.product_total_value g
-JOIN bronze.raw_products b
-  ON b.logical_date = g.bronze_logical_date
- AND b.record_index = g.bronze_record_index;
+CREATE OR REPLACE VIEW gold.v_trace_order_lines AS
+SELECT g.release_id, rel.release_version, g.order_item_id, g.order_id, g.product_id, g.line_revenue,
+       g.bronze_arrival_id, g.bronze_record_index,
+       a.source_file, a.file_sha256, a.schema_version, a.batch_id, a.arrived_at, a.dag_run_id,
+       r.payload AS bronze_payload
+FROM gold.order_lines g
+JOIN ops.release rel     ON rel.release_id = g.release_id
+JOIN bronze.record r     ON r.arrival_id = g.bronze_arrival_id AND r.record_index = g.bronze_record_index
+JOIN bronze.arrival a    ON a.arrival_id = r.arrival_id;
 
-CREATE OR REPLACE VIEW gold.v_trace_product_variation_flat AS
-SELECT g.product_id, g.variation_seq, g.store_name, g.product_name, g.variation_price,
-       'raw_store_catalog'::TEXT AS source_table,
-       b.logical_date, b.record_index, b.source_file, b.file_sha256, b.dag_run_id, b.payload
-FROM gold.product_variation_flat g
-JOIN bronze.raw_store_catalog b
-  ON b.logical_date = g.bronze_logical_date
- AND b.record_index = g.bronze_record_index;
+CREATE OR REPLACE VIEW gold.v_trace_daily_sales_by_category AS
+SELECT g.release_id, rel.release_version, g.order_date, g.category_id, g.revenue,
+       (l.value ->> 'arrival_id')::BIGINT    AS bronze_arrival_id,
+       (l.value ->> 'record_index')::INTEGER AS bronze_record_index,
+       a.source_file, a.file_sha256, a.schema_version, a.batch_id, a.arrived_at, a.dag_run_id,
+       r.payload AS bronze_payload
+FROM gold.daily_sales_by_category g
+JOIN ops.release rel     ON rel.release_id = g.release_id
+CROSS JOIN LATERAL jsonb_array_elements(g.bronze_lineage) AS l (value)
+JOIN bronze.record r     ON r.arrival_id = (l.value ->> 'arrival_id')::BIGINT
+                        AND r.record_index = (l.value ->> 'record_index')::INTEGER
+JOIN bronze.arrival a    ON a.arrival_id = r.arrival_id;
 
-CREATE OR REPLACE VIEW gold.v_trace_user_activity_summary AS
-SELECT g.user_id, g.name, g.activity_count, g.total_activity_duration,
-       'raw_users'::TEXT AS source_table,
-       b.logical_date, b.record_index, b.source_file, b.file_sha256, b.dag_run_id, b.payload
-FROM gold.user_activity_summary g
-JOIN bronze.raw_users b
-  ON b.logical_date = g.bronze_logical_date
- AND b.record_index = g.bronze_record_index;
+CREATE OR REPLACE VIEW gold.v_trace_customer_summary AS
+SELECT g.release_id, rel.release_version, g.customer_id, g.customer_name, g.revenue,
+       (l.value ->> 'arrival_id')::BIGINT    AS bronze_arrival_id,
+       (l.value ->> 'record_index')::INTEGER AS bronze_record_index,
+       a.source_file, a.file_sha256, a.schema_version, a.batch_id, a.arrived_at, a.dag_run_id,
+       r.payload AS bronze_payload
+FROM gold.customer_summary g
+JOIN ops.release rel     ON rel.release_id = g.release_id
+CROSS JOIN LATERAL jsonb_array_elements(g.bronze_lineage) AS l (value)
+JOIN bronze.record r     ON r.arrival_id = (l.value ->> 'arrival_id')::BIGINT
+                        AND r.record_index = (l.value ->> 'record_index')::INTEGER
+JOIN bronze.arrival a    ON a.arrival_id = r.arrival_id;
 
-CREATE OR REPLACE VIEW gold.v_trace_inventory_value_by_category AS
-SELECT g.store_name, g.product_category, g.product_count, g.inventory_value,
-       'raw_store_catalog'::TEXT AS source_table,
-       b.logical_date, b.record_index, b.source_file, b.file_sha256, b.dag_run_id, b.payload
-FROM gold.inventory_value_by_category g
-CROSS JOIN LATERAL jsonb_array_elements(g.bronze_lineage) AS l (ref)
-JOIN bronze.raw_store_catalog b
-  ON b.logical_date = (l.ref ->> 'logical_date')::DATE
- AND b.record_index = (l.ref ->> 'record_index')::INTEGER;
+-- Lineage = the product's own catalog record + the order records that sold it.
+CREATE OR REPLACE VIEW gold.v_trace_product_performance AS
+SELECT g.release_id, rel.release_version, g.product_id, g.product_name, g.revenue,
+       (l.value ->> 'arrival_id')::BIGINT    AS bronze_arrival_id,
+       (l.value ->> 'record_index')::INTEGER AS bronze_record_index,
+       a.source_file, a.file_sha256, a.schema_version, a.batch_id, a.arrived_at, a.dag_run_id,
+       r.payload AS bronze_payload
+FROM gold.product_performance g
+JOIN ops.release rel     ON rel.release_id = g.release_id
+CROSS JOIN LATERAL jsonb_array_elements(g.bronze_lineage) AS l (value)
+JOIN bronze.record r     ON r.arrival_id = (l.value ->> 'arrival_id')::BIGINT
+                        AND r.record_index = (l.value ->> 'record_index')::INTEGER
+JOIN bronze.arrival a    ON a.arrival_id = r.arrival_id;

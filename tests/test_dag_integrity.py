@@ -1,8 +1,11 @@
 """DAG integrity tests: parse the DAG folder the same way the scheduler does."""
 import pytest
 from airflow.models import DagBag
+from airflow.utils.trigger_rule import TriggerRule
 
 DAG_ID = "json_medallion_pipeline"
+SOURCES = ("orders", "products")
+GOLD_BUILDS = ("order_lines", "daily_sales_by_category", "customer_summary", "product_performance")
 
 
 @pytest.fixture(scope="module")
@@ -32,45 +35,46 @@ def test_dag_basics(dag):
     assert dag.template_searchpath and dag.template_searchpath[0].endswith("/sql")
 
 
-def test_dag_structure(dag):
-    task_ids = set(dag.task_ids)
+def test_task_ids(dag):
+    expected = {"setup_schemas", "create_release", "publish_release", "gold.check_reconciliation"}
+    for src in SOURCES:
+        expected |= {f"bronze.ingest_{src}", f"silver.transform_{src}", f"silver.check_{src}"}
+    expected |= {f"gold.build_{model}" for model in GOLD_BUILDS}
+    assert set(dag.task_ids) == expected
 
-    assert "setup_schemas" in task_ids
-    assert "record_load_audit" in task_ids
-    for src in ("products", "users", "store_catalog"):
-        assert {f"bronze.land_{src}", f"bronze.load_{src}", f"bronze.check_{src}"} <= task_ids
-        assert {f"silver.transform_{src}", f"silver.check_{src}"} <= task_ids
-    for model in (
-        "user_activity_summary",
-        "product_variation_flat",
-        "inventory_value_by_category",
-        "product_total_value",
-    ):
-        assert f"gold.build_{model}" in task_ids
 
-    # Lane isolation: the users lane never waits on the products lane.
-    assert dag.get_task("silver.transform_users").upstream_task_ids == {"bronze.check_users"}
+def test_lanes(dag):
+    for src in SOURCES:
+        assert dag.get_task(f"bronze.ingest_{src}").upstream_task_ids == {"setup_schemas"}
+        assert dag.get_task(f"silver.check_{src}").upstream_task_ids == {f"silver.transform_{src}"}
+    assert dag.get_task("silver.transform_products").upstream_task_ids == {"bronze.ingest_products"}
 
-    # Each gold model waits only for the silver lane it reads.
-    gold_upstream = {
-        "gold.build_user_activity_summary": {"silver.check_users"},
-        "gold.build_product_total_value": {"silver.check_products"},
-        "gold.build_product_variation_flat": {"silver.check_store_catalog"},
-        "gold.build_inventory_value_by_category": {"silver.check_store_catalog"},
-    }
-    for task_id, expected in gold_upstream.items():
-        assert dag.get_task(task_id).upstream_task_ids == expected, task_id
 
-    # The audit is the single sink.
+def test_orders_transform_waits_for_the_products_check_with_all_success(dag):
+    """Silver orders reads silver.products (unknown-product items are parked), so it follows the products lane."""
+    transform = dag.get_task("silver.transform_orders")
+    assert transform.upstream_task_ids == {"bronze.ingest_orders", "silver.check_products"}
+    assert transform.trigger_rule == TriggerRule.ALL_SUCCESS
+
+
+def test_gold_builds_read_silver_and_run_in_parallel(dag):
+    expected = {"silver.check_orders", "silver.check_products", "create_release"}
+    for model in GOLD_BUILDS:
+        assert dag.get_task(f"gold.build_{model}").upstream_task_ids == expected, model
+    assert dag.get_task("gold.check_reconciliation").upstream_task_ids == {f"gold.build_{m}" for m in GOLD_BUILDS}
+
+
+def test_publish_release_is_the_single_sink(dag):
     leaves = {t.task_id for t in dag.tasks if not t.downstream_task_ids}
-    assert leaves == {"record_load_audit"}
+    assert leaves == {"publish_release"}
+    publish = dag.get_task("publish_release")
+    assert publish.trigger_rule == TriggerRule.ALL_DONE
+    assert publish.upstream_task_ids == {"create_release", "gold.check_reconciliation"}
 
 
-def test_setup_creates_lineage_trace_views(dag):
-    sql = dag.get_task("setup_schemas").sql
-    text = "\n".join(sql) if isinstance(sql, list) else sql
-    for view in ("product_total_value", "product_variation_flat", "user_activity_summary", "inventory_value_by_category"):
-        assert f"gold.v_trace_{view}" in text
+def test_gold_task_ids_keep_the_prefix_publish_relies_on(dag):
+    gold = [t for t in dag.task_ids if t.startswith("gold.")]
+    assert len(gold) == len(GOLD_BUILDS) + 1
 
 
 def test_dag_root_is_setup(dag):
@@ -78,26 +82,34 @@ def test_dag_root_is_setup(dag):
     assert roots == {"setup_schemas"}
 
 
-def test_sql_files_exist(sql_dir):
-    """Every SQL path the pipeline references must resolve under sql/."""
-    refs = ["bronze/ddl.sql", "silver/ddl.sql", "gold/ddl.sql", "gold/trace_views.sql", "ops/ddl.sql"]
-    refs += ["checks/gold_activity_reconciliation.sql", "checks/gold_catalog_reconciliation.sql"]
-    refs += [f"silver/{name}.sql" for name in ("products", "users", "store_catalog")]
-    refs += [
-        "gold/user_activity_summary.sql",
-        "gold/product_total_value.sql",
-        "gold/product_variation_flat.sql",
-        "gold/inventory_value_by_category.sql",
-    ]
+def test_setup_ddl_order_and_views(dag):
+    text = "\n".join(dag.get_task("setup_schemas").sql)
+    markers = (
+        "CREATE SCHEMA IF NOT EXISTS bronze", "CREATE SCHEMA IF NOT EXISTS ops",
+        "CREATE SCHEMA IF NOT EXISTS silver", "CREATE SCHEMA IF NOT EXISTS gold",
+        "gold.v_trace_order_lines", "analytics.order_lines",
+    )
+    positions = [text.index(marker) for marker in markers]
+    assert positions == sorted(positions)
+    for model in GOLD_BUILDS:
+        assert f"gold.v_trace_{model}" in text
 
+
+def test_sql_files_exist(sql_dir, pipeline_dir):
+    refs = ["bronze/ddl.sql", "ops/ddl.sql", "silver/ddl.sql", "gold/ddl.sql",
+            "gold/trace_views.sql", "gold/consumer_views.sql", "checks/gold_reconciliation.sql"]
+    refs += [f"checks/silver_{src}.sql" for src in SOURCES]
+    refs += [f"silver/{src}.sql" for src in SOURCES]
+    refs += [f"gold/{m}.sql" for m in GOLD_BUILDS]
     assert [p for p in refs if not (sql_dir / p).is_file()] == []
+    assert [s for s in ("orders.v1", "products.v1")
+            if not (pipeline_dir / "schemas" / f"{s}.json").is_file()] == []
 
 
 def test_sql_templates_resolved_at_parse_time(dag):
     """DagBag resolves `template_ext` file references via template_searchpath.
 
-    If a path were misspelled or outside the searchpath, the operator's `sql`
-    would still be the literal '<path>.sql' string instead of SQL text.
+    A misspelled path would leave the operator's `sql` as the literal '<path>.sql' string.
     """
     unresolved = []
     for t in dag.tasks:
@@ -108,5 +120,5 @@ def test_sql_templates_resolved_at_parse_time(dag):
             if stmt.strip().endswith(".sql"):
                 unresolved.append((t.task_id, stmt))
     assert unresolved == []
-    assert "CREATE SCHEMA" in "\n".join(dag.get_task("setup_schemas").sql)
-    assert "silver.users" in dag.get_task("silver.transform_users").sql
+    assert "silver.orders" in dag.get_task("silver.transform_orders").sql
+    assert "release_id" in dag.get_task("gold.check_reconciliation").sql

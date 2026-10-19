@@ -1,0 +1,8 @@
+{
+  "source": "order_service",
+  "batch_id": "20260905_orders",
+  "records": [
+    {"order_id":"O4009","ordered_at":"2027-03-01T00:00:00Z","customer":{"customer_id":"C003","name":"Casey Ng"},"shipping":{"city":"Evanston","state":"IL","method":"ground"},"items":[{"order_item_id":"OI-4009-1","product_id":"P100","quantity":1,"unit_price":49.99}]},
+    {"order_id":"O4010","ordered_at":"2026-09-05T09:00:00Z","customer":{"customer_id":"C003","name":"Casey Ng"},"shipping":{"city":"Evanston","state":"IL","method":"ground"},"items":[{"order_item_id":"OI-4010-1","product_id":"P200","quantity":1,"unit_price":10.0}]}
+  ]
+}

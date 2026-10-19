@@ -1,0 +1,8 @@
+{
+  "source": "catalog_service",
+  "batch_id": "20260905_products",
+  "records": [
+    {"product_id":"P405","details":{"sku":"SKU-P405","name":"Item P405","brand":"Acme"},"category":{"id":"TOOLS","path":["Tools","Power Tools"]},"prices":[{"currency":"USD","amount":9.0,"is_current":true},{"currency":"USD","amount":8.0,"is_current":true}]},
+    {"product_id":"P406","details":{"sku":"SKU-P406","name":"Item P406","brand":"Acme"},"category":{"id":"TOOLS","path":["Tools","Power Tools"]},"prices":[{"currency":"USD","amount":9.0,"is_current":true},{"currency":"EUR","amount":8.0,"is_current":true}]}
+  ]
+}

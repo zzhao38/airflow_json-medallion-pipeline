@@ -1,0 +1,14 @@
+{
+  "source": "catalog_service",
+  "batch_id": "20260913_products",
+  "records": [
+    {"product_id":"P100","details":{"sku":"DRILL-18V","name":"18V Drill","brand":"Acme"},"category":{"id":"TOOLS","path":["Tools","Power Tools"]},"prices":[{"currency":"USD","amount":49.99,"is_current":true}]},
+    {"product_id":"P200","details":{"sku":"GLOVE-XL","name":"Safety Gloves","brand":"SafeHands"},"category":{"id":"SAFETY","path":["Safety","PPE"]},"prices":[{"currency":"USD","amount":10.00,"is_current":true}]},
+    {"product_id":"P300","details":{"sku":"WIRE-100","name":"Copper Wire","brand":"VoltCo"},"category":{"id":"ELECTRICAL","path":["Electrical","Wire"]},"prices":[{"currency":"USD","amount":25.00,"is_current":true}]},
+    {"product_id":"P601","details":{"sku":"SKU-P601","name":"Item P601","brand":"Acme"},"category":{"id":"TOOLS","path":["Tools","Power Tools"]},"prices":[{"currency":"USD","amount":12.50,"is_current":true}]},
+    {"product_id":"P602","details":{"sku":"SKU-P602","name":"Item P602","brand":"Acme"},"category":{"id":"TOOLS","path":["Tools","Power Tools"]},"prices":[{"currency":"USD","amount":18.00,"is_current":true}]},
+    {"product_id":"P603","details":{"sku":"SKU-P603","name":"Item P603","brand":"SafeHands"},"category":{"id":"SAFETY","path":["Safety","PPE"]},"prices":[{"currency":"USD","amount":7.25,"is_current":true}]},
+    {"product_id":"P604","details":{"sku":"SKU-P604","name":"Item P604","brand":"VoltCo"},"category":{"id":"ELECTRICAL","path":["Electrical","Wire"]},"prices":[{"currency":"USD","amount":31.00,"is_current":true}]},
+    {"product_id":"P605","details":{"sku":"SKU-P605","name":"Item P605","brand":"VoltCo"},"category":{"id":"ELECTRICAL","path":["Electrical","Wire"]},"prices":[{"currency":"USD","amount":4.75,"is_current":true}]}
+  ]
+}

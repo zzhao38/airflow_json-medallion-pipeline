@@ -1,0 +1,10 @@
+{
+  "source": "order_service",
+  "batch_id": "20260905_orders",
+  "records": [
+    {"order_id":"O4011","ordered_at":"2026-09-05T09:00:00Z","customer":{"customer_id":"C003","name":"Casey Ng"},"shipping":{"city":"Evanston","state":"IL","method":"ground"},"items":[{"order_item_id":"OI-4011-1","product_id":"P100","quantity":1,"unit_price":49.99}]},
+    {"order_id":"O4011","ordered_at":"2026-09-05T09:00:00Z","customer":{"customer_id":"C003","name":"Casey Ng"},"shipping":{"city":"Madison","state":"IL","method":"ground"},"items":[{"order_item_id":"OI-4011-1","product_id":"P100","quantity":1,"unit_price":49.99}]},
+    {"order_id":"O4012","ordered_at":"2026-09-05T09:00:00Z","customer":{"customer_id":"C003","name":"Casey Ng"},"shipping":{"city":"Evanston","state":"IL","method":"ground"},"items":[{"order_item_id":"OI-4012-1","product_id":"P300","quantity":2,"unit_price":25.0}]},
+    {"order_id":"O4012","ordered_at":"2026-09-05T09:00:00Z","customer":{"customer_id":"C003","name":"Casey Ng"},"shipping":{"city":"Evanston","state":"IL","method":"ground"},"items":[{"order_item_id":"OI-4012-1","product_id":"P300","quantity":2,"unit_price":25.0}]}
+  ]
+}

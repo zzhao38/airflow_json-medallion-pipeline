@@ -1,0 +1,420 @@
+{
+  "description": "Dirty-data scenarios. Each file replaces <source>.json on the same logical date as a clean run of data/samples/{orders,products}.json. Business-rule violations reject one record; schema/JSON problems quarantine the file and hold the release. loaded/rejected/parked_items/warns describe silver for that delivery only.",
+  "scenarios": [
+    {
+      "name": "orders_bad_quantity",
+      "file": "orders_bad_quantity.json",
+      "source": "orders",
+      "layer": "silver",
+      "description": "Item with quantity 0: that order is rejected, the other order in the file loads.",
+      "bronze": {
+        "status": "ACCEPTED"
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "O4002"
+      ],
+      "rejected": {
+        "O4001": "quantity 0 must be > 0"
+      }
+    },
+    {
+      "name": "orders_negative_price",
+      "file": "orders_negative_price.json",
+      "source": "orders",
+      "layer": "silver",
+      "description": "Item with a negative unit_price.",
+      "bronze": {
+        "status": "ACCEPTED"
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "O4004"
+      ],
+      "rejected": {
+        "O4003": "unit_price"
+      }
+    },
+    {
+      "name": "orders_reused_item_id",
+      "file": "orders_reused_item_id.json",
+      "source": "orders",
+      "layer": "silver",
+      "description": "order_item_id reused by a later order, twice in one order, or owned by an order already in silver.",
+      "bronze": {
+        "status": "ACCEPTED"
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "O4005"
+      ],
+      "rejected": {
+        "O4006": "already used by order O4005",
+        "O4007": "appears more than once in the order",
+        "O4008": "already belongs to order O1001 in silver"
+      }
+    },
+    {
+      "name": "orders_future_dated",
+      "file": "orders_future_dated.json",
+      "source": "orders",
+      "layer": "silver",
+      "description": "ordered_at after the batch date.",
+      "bronze": {
+        "status": "ACCEPTED"
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "O4010"
+      ],
+      "rejected": {
+        "O4009": "is after the batch date"
+      }
+    },
+    {
+      "name": "orders_duplicates",
+      "file": "orders_duplicates.json",
+      "source": "orders",
+      "layer": "silver",
+      "description": "O4011 sent twice with different content (both rejected); O4012 sent twice identically (kept once, WARN).",
+      "bronze": {
+        "status": "ACCEPTED"
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "O4012"
+      ],
+      "rejected": {
+        "O4011": "conflicting duplicates for order_id O4011 (2 versions)"
+      },
+      "warns": [
+        "2 records for order_id O4012 (identical)"
+      ]
+    },
+    {
+      "name": "orders_unknown_product",
+      "file": "orders_unknown_product.json",
+      "source": "orders",
+      "layer": "silver",
+      "description": "Order with one item whose product is not in the catalog: order kept, item parked, kept out of gold.",
+      "bronze": {
+        "status": "ACCEPTED"
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "O4013"
+      ],
+      "parked_items": [
+        "OI-4013-2"
+      ],
+      "warns": [
+        "item OI-4013-2 references unknown product P500 (parked)"
+      ]
+    },
+    {
+      "name": "orders_customer_name_conflict",
+      "file": "orders_customer_name_conflict.json",
+      "source": "orders",
+      "layer": "silver",
+      "description": "Same customer_id with two names in one batch: WARN, last one kept.",
+      "bronze": {
+        "status": "ACCEPTED"
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "O4014",
+        "O4015"
+      ],
+      "warns": [
+        "customer C005 has 2 names in batch"
+      ]
+    },
+    {
+      "name": "orders_bad_schema",
+      "file": "orders_bad_schema.json",
+      "source": "orders",
+      "layer": "bronze",
+      "description": "quantity is a string: file-level schema violation.",
+      "bronze": {
+        "status": "QUARANTINED",
+        "reason_contains": "$.records[0].items[0].quantity"
+      },
+      "release": "HELD"
+    },
+    {
+      "name": "orders_wrong_source",
+      "file": "orders_wrong_source.json",
+      "source": "orders",
+      "layer": "bronze",
+      "description": "Envelope source is not order_service.",
+      "bronze": {
+        "status": "QUARANTINED",
+        "reason_contains": "$.source"
+      },
+      "release": "HELD"
+    },
+    {
+      "name": "orders_empty",
+      "file": "orders_empty.json",
+      "source": "orders",
+      "layer": "bronze",
+      "description": "Valid envelope with zero records.",
+      "bronze": {
+        "status": "QUARANTINED",
+        "reason_contains": "no records: $.records is empty"
+      },
+      "release": "HELD"
+    },
+    {
+      "name": "orders_invalid_json",
+      "file": "orders_invalid_json.json",
+      "source": "orders",
+      "layer": "bronze",
+      "description": "Truncated file.",
+      "bronze": {
+        "status": "QUARANTINED",
+        "reason_contains": "invalid JSON"
+      },
+      "release": "HELD"
+    },
+    {
+      "name": "orders_missing_customer",
+      "file": "orders_missing_customer.json",
+      "source": "orders",
+      "layer": "bronze",
+      "description": "One order has no customer object: required field missing, whole file quarantined.",
+      "bronze": {
+        "status": "QUARANTINED",
+        "reason_contains": "$.records[1]"
+      },
+      "release": "HELD"
+    },
+    {
+      "name": "orders_bad_timestamp",
+      "file": "orders_bad_timestamp.json",
+      "source": "orders",
+      "layer": "bronze",
+      "description": "ordered_at is MM/DD/YYYY, not ISO-8601.",
+      "bronze": {
+        "status": "QUARANTINED",
+        "reason_contains": "$.records[0].ordered_at"
+      },
+      "release": "HELD"
+    },
+    {
+      "name": "orders_no_items",
+      "file": "orders_no_items.json",
+      "source": "orders",
+      "layer": "bronze",
+      "description": "An order with items: [] violates minItems 1.",
+      "bronze": {
+        "status": "QUARANTINED",
+        "reason_contains": "$.records[0].items"
+      },
+      "release": "HELD"
+    },
+    {
+      "name": "products_negative_price",
+      "file": "products_negative_price.json",
+      "source": "products",
+      "layer": "silver",
+      "description": "Negative price on an existing product (old version stays) and on a new one.",
+      "bronze": {
+        "status": "ACCEPTED"
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "P401"
+      ],
+      "rejected": {
+        "P100": "must be >= 0",
+        "P400": "must be >= 0"
+      }
+    },
+    {
+      "name": "products_no_current_price",
+      "file": "products_no_current_price.json",
+      "source": "products",
+      "layer": "silver",
+      "description": "No current price: rejected. P404 only has a current price plus a history row: kept.",
+      "bronze": {
+        "status": "ACCEPTED"
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "P404"
+      ],
+      "rejected": {
+        "P402": "no current price",
+        "P403": "no current price"
+      }
+    },
+    {
+      "name": "products_two_current_prices",
+      "file": "products_two_current_prices.json",
+      "source": "products",
+      "layer": "silver",
+      "description": "Two current prices in one currency is ambiguous; one per currency is fine.",
+      "bronze": {
+        "status": "ACCEPTED"
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "P406"
+      ],
+      "rejected": {
+        "P405": "2 current prices for currency USD"
+      }
+    },
+    {
+      "name": "products_duplicates",
+      "file": "products_duplicates.json",
+      "source": "products",
+      "layer": "silver",
+      "description": "P407 sent twice with different content (both rejected); P408 twice identically (kept once, WARN).",
+      "bronze": {
+        "status": "ACCEPTED"
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "P408"
+      ],
+      "rejected": {
+        "P407": "conflicting duplicates for product_id P407 (2 versions)"
+      },
+      "warns": [
+        "2 records for product_id P408 (identical)"
+      ]
+    },
+    {
+      "name": "products_new_product",
+      "file": "products_new_product.json",
+      "source": "products",
+      "layer": "silver",
+      "description": "Adds P500, the product orders_unknown_product refers to.",
+      "bronze": {
+        "status": "ACCEPTED"
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "P500"
+      ]
+    },
+    {
+      "name": "products_volume_spike",
+      "file": "products_volume_spike.json",
+      "source": "products",
+      "layer": "silver",
+      "description": "3 -> 8 records (+167%) against the previous accepted file: WARN only, everything loads.",
+      "bronze": {
+        "status": "ACCEPTED",
+        "warns": [
+          "record_count 8 vs previous accepted 3"
+        ]
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "P601",
+        "P602",
+        "P603",
+        "P604",
+        "P605"
+      ]
+    },
+    {
+      "name": "products_batch_reuse",
+      "file": "products_batch_reuse.json",
+      "source": "products",
+      "layer": "silver",
+      "description": "Same batch_id as the accepted delivery (20260902_products) but P300 costs 26.00: WARN, new SCD-2 version.",
+      "bronze": {
+        "status": "ACCEPTED",
+        "warns": [
+          "batch_id 20260902_products re-delivered with different content"
+        ]
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "P300"
+      ]
+    },
+    {
+      "name": "products_price_change",
+      "file": "products_price_change.json",
+      "source": "products",
+      "layer": "silver",
+      "description": "P100 catalog price changes: new SCD-2 version.",
+      "bronze": {
+        "status": "ACCEPTED"
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "P100"
+      ]
+    },
+    {
+      "name": "products_bad_currency",
+      "file": "products_bad_currency.json",
+      "source": "products",
+      "layer": "bronze",
+      "description": "Lowercase currency code violates the schema pattern.",
+      "bronze": {
+        "status": "QUARANTINED",
+        "reason_contains": "$.records[0].prices[0].currency"
+      },
+      "release": "HELD"
+    },
+    {
+      "name": "gold_reconciliation_tamper",
+      "layer": "pipeline",
+      "automated": true,
+      "description": "Gold revenue edited after the build: reconciliation check fails, release is HELD, destinations keep the previous release.",
+      "where": "ops.release (status, hold_reason), ops.destination",
+      "talking_point": "The reconciliation check re-derives expected gold totals from silver, so a bad gold build can never be promoted.",
+      "test": "test_tampered_gold_is_held_and_destinations_stay_put"
+    },
+    {
+      "name": "release_retry_reuse",
+      "layer": "pipeline",
+      "automated": true,
+      "description": "create_release called twice for the same run and date returns the same BUILDING release.",
+      "where": "ops.release (one row per run)",
+      "talking_point": "Task retries are idempotent: a retried create_release reuses the BUILDING release instead of minting a new version.",
+      "test": "test_create_release_is_reused_on_retry"
+    },
+    {
+      "name": "additive_schema_change",
+      "layer": "pipeline",
+      "automated": true,
+      "description": "Products file with an extra unknown field per record is ACCEPTED and loads.",
+      "where": "bronze.arrival (ACCEPTED), bronze.record payload keeps the extra field",
+      "talking_point": "Schemas require what silver needs and tolerate extra properties, so upstream can add fields without a quarantine.",
+      "test": "test_additive_extra_field_is_accepted_and_loads"
+    },
+    {
+      "name": "landing_file_missing",
+      "layer": "pipeline",
+      "automated": true,
+      "description": "No landing file: ingest raises FileNotFoundError and writes no bronze.arrival row.",
+      "where": "Airflow task log (failed ingest task), no new bronze.arrival row",
+      "talking_point": "A missing file is not a delivery: the task fails loudly and retries instead of recording a fake arrival.",
+      "test": "test_missing_landing_file_raises_and_records_no_arrival"
+    },
+    {
+      "name": "warehouse_down_mid_run",
+      "layer": "pipeline",
+      "automated": false,
+      "description": "Warehouse unreachable mid-run: the task retries (retries=2); the release stays BUILDING and is reused on retry.",
+      "where": "Airflow task retries; ops.release stays BUILDING until publish or hold",
+      "talking_point": "Every DB step is its own transaction and create_release reuses the BUILDING row, so a retry resumes rather than restarts."
+    },
+    {
+      "name": "breaking_schema_change",
+      "layer": "pipeline",
+      "automated": false,
+      "description": "Incompatible upstream change (renamed or retyped field): files quarantine against v1 until a v2 schema is rolled out.",
+      "where": "bronze.arrival QUARANTINED with the JSON path; schemas/ folder",
+      "talking_point": "Breaking change means a new schemas/<source>.v2.json and a versioned rollout; v1 files keep validating against v1."
+    }
+  ]
+}
