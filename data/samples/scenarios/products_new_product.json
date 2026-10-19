@@ -1,0 +1,7 @@
+{
+  "source": "catalog_service",
+  "batch_id": "20260905_products",
+  "records": [
+    {"product_id":"P500","details":{"sku":"SKU-P500","name":"Item P500","brand":"Acme"},"category":{"id":"TOOLS","path":["Tools","Power Tools"]},"prices":[{"currency":"USD","amount":15.0,"is_current":true}]}
+  ]
+}

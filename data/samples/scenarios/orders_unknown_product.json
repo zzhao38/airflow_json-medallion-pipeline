@@ -1,0 +1,7 @@
+{
+  "source": "order_service",
+  "batch_id": "20260905_orders",
+  "records": [
+    {"order_id":"O4013","ordered_at":"2026-09-05T09:00:00Z","customer":{"customer_id":"C003","name":"Casey Ng"},"shipping":{"city":"Evanston","state":"IL","method":"ground"},"items":[{"order_item_id":"OI-4013-1","product_id":"P100","quantity":1,"unit_price":49.99},{"order_item_id":"OI-4013-2","product_id":"P500","quantity":1,"unit_price":15.0}]}
+  ]
+}

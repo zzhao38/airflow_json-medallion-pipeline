@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/products.v1.json",
+  "title": "products.v1",
+  "description": "products.json from catalog_service: {source, batch_id, records[]}. Required = what silver needs; extra properties are tolerated so upstream can add fields without a quarantine.",
+  "type": "object",
+  "required": ["source", "batch_id", "records"],
+  "properties": {
+    "source": {"const": "catalog_service"},
+    "batch_id": {"type": "string"},
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["product_id", "details", "category", "prices"],
+        "properties": {
+          "product_id": {"type": "string"},
+          "details": {
+            "type": "object",
+            "required": ["sku", "name", "brand"],
+            "properties": {
+              "sku": {"type": "string"},
+              "name": {"type": "string"},
+              "brand": {"type": "string"}
+            },
+            "additionalProperties": true
+          },
+          "category": {
+            "type": "object",
+            "required": ["id", "path"],
+            "properties": {
+              "id": {"type": "string"},
+              "path": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+            },
+            "additionalProperties": true
+          },
+          "prices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["currency", "amount", "is_current"],
+              "properties": {
+                "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+                "amount": {"type": "number"},
+                "is_current": {"type": "boolean"}
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

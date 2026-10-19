@@ -1,0 +1,7 @@
+{
+  "source": "catalog_service",
+  "batch_id": "20260905_products",
+  "records": [
+    {"product_id":"P409","details":{"sku":"SKU-P409","name":"Item P409","brand":"Acme"},"category":{"id":"TOOLS","path":["Tools","Power Tools"]},"prices":[{"currency":"usd","amount":4.0,"is_current":true}]}
+  ]
+}

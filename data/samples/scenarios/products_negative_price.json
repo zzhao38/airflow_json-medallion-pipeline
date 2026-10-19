@@ -1,0 +1,9 @@
+{
+  "source": "catalog_service",
+  "batch_id": "20260905_products",
+  "records": [
+    {"product_id":"P100","details":{"sku":"SKU-P100","name":"18V Drill","brand":"Acme"},"category":{"id":"TOOLS","path":["Tools","Power Tools"]},"prices":[{"currency":"USD","amount":-1.0,"is_current":true}]},
+    {"product_id":"P400","details":{"sku":"SKU-P400","name":"Item P400","brand":"Acme"},"category":{"id":"TOOLS","path":["Tools","Power Tools"]},"prices":[{"currency":"USD","amount":-3.0,"is_current":true}]},
+    {"product_id":"P401","details":{"sku":"SKU-P401","name":"Item P401","brand":"Acme"},"category":{"id":"TOOLS","path":["Tools","Power Tools"]},"prices":[{"currency":"USD","amount":7.5,"is_current":true}]}
+  ]
+}

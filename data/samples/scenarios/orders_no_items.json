@@ -1,0 +1,7 @@
+{
+  "source": "order_service",
+  "batch_id": "20260912_orders",
+  "records": [
+    {"order_id":"O4019","ordered_at":"2026-09-03T11:00:00Z","customer":{"customer_id":"C001","name":"Jordan Lee"},"shipping":{"city":"Evanston","state":"IL","method":"ground"},"items":[]}
+  ]
+}

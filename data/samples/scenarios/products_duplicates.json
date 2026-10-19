@@ -1,0 +1,10 @@
+{
+  "source": "catalog_service",
+  "batch_id": "20260905_products",
+  "records": [
+    {"product_id":"P407","details":{"sku":"SKU-P407","name":"Version A","brand":"Acme"},"category":{"id":"TOOLS","path":["Tools","Power Tools"]},"prices":[{"currency":"USD","amount":4.0,"is_current":true}]},
+    {"product_id":"P407","details":{"sku":"SKU-P407","name":"Version B","brand":"Acme"},"category":{"id":"TOOLS","path":["Tools","Power Tools"]},"prices":[{"currency":"USD","amount":4.0,"is_current":true}]},
+    {"product_id":"P408","details":{"sku":"SKU-P408","name":"Item P408","brand":"Acme"},"category":{"id":"TOOLS","path":["Tools","Power Tools"]},"prices":[{"currency":"USD","amount":4.0,"is_current":true}]},
+    {"product_id":"P408","details":{"sku":"SKU-P408","name":"Item P408","brand":"Acme"},"category":{"id":"TOOLS","path":["Tools","Power Tools"]},"prices":[{"currency":"USD","amount":4.0,"is_current":true}]}
+  ]
+}

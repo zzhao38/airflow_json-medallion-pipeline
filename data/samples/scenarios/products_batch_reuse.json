@@ -1,0 +1,9 @@
+{
+  "source": "catalog_service",
+  "batch_id": "20260902_products",
+  "records": [
+    {"product_id":"P100","details":{"sku":"DRILL-18V","name":"18V Drill","brand":"Acme"},"category":{"id":"TOOLS","path":["Tools","Power Tools"]},"prices":[{"currency":"USD","amount":49.99,"is_current":true}]},
+    {"product_id":"P200","details":{"sku":"GLOVE-XL","name":"Safety Gloves","brand":"SafeHands"},"category":{"id":"SAFETY","path":["Safety","PPE"]},"prices":[{"currency":"USD","amount":10.00,"is_current":true}]},
+    {"product_id":"P300","details":{"sku":"WIRE-100","name":"Copper Wire","brand":"VoltCo"},"category":{"id":"ELECTRICAL","path":["Electrical","Wire"]},"prices":[{"currency":"USD","amount":26.00,"is_current":true}]}
+  ]
+}
