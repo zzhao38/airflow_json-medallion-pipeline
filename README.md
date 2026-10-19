@@ -1,151 +1,104 @@
 # airflow_json-medallion-pipeline
 
-An end-to-end JSON pipeline on **Apache Airflow 2.11** and **PostgreSQL**, organized into
-**Bronze → Silver → Gold** layers. Two nested JSON documents (`orders`, `products`)
-are schema-validated, stored immutably, normalized to 3NF with history (SCD-2), and rolled up into
-analytics models that consumers only see once a whole **release** has passed every check.
-Includes quarantine of bad files, idempotent reruns, and row-level lineage from a gold number back to
-the raw JSON. Runs locally in Docker.
-
-**Stack:** Airflow (LocalExecutor) · Postgres (separate metadata DB and warehouse) · SQL-first transforms · JSON Schema · pytest · Docker Compose.
-
-## Architecture
-
-```mermaid
-flowchart LR
-    subgraph Landing["data/landing (hosted files)"]
-        F1[products.json]
-        F2[orders.json]
-    end
-
-    subgraph Airflow["Airflow · LocalExecutor"]
-        direction LR
-        S[setup_schemas] --> B
-        S --> R[create_release]
-        subgraph B["bronze"]
-            direction TB
-            I[ingest_*]
-        end
-        B --> SV
-        subgraph SV["silver"]
-            direction TB
-            T[transform_*] --> SC[check_*]
-        end
-        SV --> G
-        R --> G
-        subgraph G["gold"]
-            direction TB
-            GB[build_*] --> GC[check_*_reconciliation]
-        end
-        G --> P[publish_release]
-    end
-
-    subgraph PG["Postgres · warehouse"]
-        direction TB
-        BZ[("bronze.arrival / record<br/>append-only, JSONB")]
-        SL[("silver.*<br/>3NF, SCD-2 parents")]
-        GD[("gold.*<br/>one build per release")]
-        OPS[("ops.release / destination<br/>ops.quality_issue")]
-        CV[("analytics.* / finance.*<br/>active release only")]
-    end
-
-    Landing --> I
-    I -. "valid: copy" .-> BF[/"data/bronze/&lt;source&gt;/dt=&lt;ds&gt;/&lt;run&gt;/"/]
-    I -. "invalid: copy" .-> QF[/"data/quarantine/..."/]
-    I --> BZ
-    T --> SL
-    GB --> GD
-    P --> OPS
-    OPS --> CV
-    GD --> CV
-```
-
-| Layer | Storage | Contract |
-|---|---|---|
-| **Landing** | `data/landing/*.json` | Files as delivered; untrusted. |
-| **Bronze** | `bronze.arrival` + `bronze.record` (JSONB) and `data/bronze/<source>/dt=<ds>/<run>/` | Append-only record of every delivery. Each file is hashed (SHA-256) and validated against `schemas/<source>.v1.json`. Valid → `ACCEPTED`; identical bytes for the same date → `DUPLICATE` (no new records); invalid → `QUARANTINED` (file kept in `data/quarantine/`, nothing reaches `bronze.record`). |
-| **Silver** | `silver.*` | Typed 3NF tables. Parents (`customers`, `products`) are **SCD-2**: a new version only when the row hash changes. `orders` / `order_items` are upserted by key; `categories` and `product_prices` hold the catalog hierarchy and price history. Invalid orders go to `silver.rejected_record` (the rest of the file still loads). Every row carries `bronze_arrival_id` / `bronze_record_index`. |
-| **Gold** | `gold.*` | Question-shaped models, keyed `(release_id, …)`. Each run builds a **new release**; earlier releases are never rewritten. Traceable to raw JSON via `gold.v_trace_*`. |
-| **Consumers** | `analytics.*`, `finance.*` | Views over the destination's **active release** (`ops.destination`). Rows carry `release_version` and `released_at`. A held build is invisible: consumers keep seeing the last good release. |
-| **Ops** | `ops.release`, `ops.destination`, `ops.quality_issue` | Release status (`BUILDING` / `PUBLISHED` / `HELD`), input arrivals, row counts, hold reason, WARN/ERROR issues. |
-
-**DAG** (`json_medallion_pipeline`): `setup_schemas` → `bronze.ingest_{orders,products}` → `silver.transform_products` → `silver.check_products` → `silver.transform_orders` → `silver.check_orders`; `create_release` plus both silver checks feed the four `gold.build_*` tasks (`order_lines`, `daily_sales_by_category`, `customer_summary`, `product_performance`) → `gold.check_reconciliation` → `publish_release`.
-
-`json_medallion_pipeline` runs `@daily` (`catchup=False`, `max_active_runs=1`, 2 retries, 1-minute delay); trigger it manually with `make trigger`.
-
-### Failure behaviour
-
-- A **quarantined** file skips its own lane. Orders also wait for the products lane (the orders transform looks up products; items with an unknown product are parked), so a quarantined products file skips the orders transform too; a quarantined orders file never blocks products.
-- `publish_release` is the single sink (`ALL_DONE`). If any lane was quarantined or any gold task did not succeed, the release is marked `HELD` with a reason, an ERROR is recorded in `ops.quality_issue`, **the run fails** (so it is visible), and consumers stay on the previous release.
-- Fix the file and trigger again: it creates release `<ds>.<n+1>` and publishes it (both destinations flip in one transaction).
-- A record count that differs from the previous accepted file by more than 30% is a **WARN** only: the file is still accepted and the release publishes.
-
-## Prerequisites
-
-- Docker Engine with Compose v2 (`docker compose`) via Docker Desktop, Rancher Desktop, or Docker Engine on Linux; ~4 GB RAM for the VM/engine; GNU `make`. No local Python needed (tests run in the image).
-- Free host ports 8080 (UI) and 5433 (warehouse), or set `AIRFLOW_PORT` / `WAREHOUSE_PORT` in `.env`.
-- Rancher Desktop: choose the **dockerd (moby)** container engine (Preferences > Container Engine; containerd/nerdctl has no `docker compose`) and make sure `docker context show` prints `rancher-desktop`.
-- Linux Docker Engine: set `AIRFLOW_UID=$(id -u)` in `.env` if you hit permission errors on `logs/` or `data/`.
+A local **Airflow 2.11 + PostgreSQL** pipeline that loads two nested JSON feeds (`orders`, `products`)
+through **Bronze → Silver → Gold**. Bad files are quarantined, bad records are rejected one by one,
+and consumers only ever see a gold **release** that passed every check. Every gold number traces
+back to the raw JSON it came from.
 
 ## Quickstart
 
-`make up` copies `data/samples/{orders,products}.json` into `data/landing/` (never overwrites existing files). Both are envelopes with `source`, `batch_id` and `records`:
-
-- `products.json`: records of `{product_id, details: {sku, name, brand}, category: {id, path: [...]}, prices: [{currency, amount, is_current}]}`
-- `orders.json`: records of `{order_id, ordered_at, customer: {customer_id, name}, shipping: {city, state, method}, items: [{order_item_id, product_id, quantity, unit_price}]}`
+Requires Docker with Compose v2 (Docker Desktop, Rancher Desktop with the **dockerd/moby** engine,
+or Docker Engine on Linux), ~4 GB RAM and `make`. No local Python needed.
 
 ```bash
-make up        # create .env, build, migrate, start the stack (copies samples into data/landing only if present)
-make trigger   # unpause + run json_medallion_pipeline once
-make psql      # query the warehouse
+make up        # build, migrate, start; copies data/samples/*.json into data/landing/
+make trigger   # run the DAG once (all green in about a minute)
+make psql      # open the warehouse
 ```
 
 - **Airflow UI:** http://localhost:8080 (`airflow` / `airflow`)
 - **Warehouse:** `postgresql://warehouse:warehouse@localhost:5433/warehouse`
-- Ports come from `.env` (`AIRFLOW_PORT`, `WAREHOUSE_PORT`; defaults 8080 / 5433); edit and re-run `make up` if they clash.
-- On Docker socket errors with Rancher Desktop, restart Rancher Desktop.
+- Ports busy? Set `AIRFLOW_PORT` / `WAREHOUSE_PORT` in `.env` and rerun `make up`.
 
-Other targets (`make help`): `down`, `restart`, `logs`, `ps`, `seed`, `unpause`, `backfill START=… END=…`, `clean`, `reset` (wipes DB volumes).
+## How a run flows
 
-Consumers query the views, not `gold.*`:
+```mermaid
+flowchart TB
+    L[/"data/landing<br/>orders.json · products.json"/] --> V{"hash + parse +<br/>JSON Schema"}
+    V -- invalid --> Q["QUARANTINED<br/>file kept, lane skipped"]
+    V -- same bytes --> D["DUPLICATE<br/>no new records"]
+    V -- valid --> A["ACCEPTED<br/>bronze.arrival + record"]
+    A --> S{"silver<br/>business rules"}
+    D --> S
+    S -- bad record --> RJ["silver.rejected_record"]
+    S -- unknown product --> PK["parked item<br/>kept out of gold"]
+    S -- ok --> SV["silver 3NF<br/>SCD-2 customers, products"]
+    SV --> G["gold build<br/>new release_id"]
+    G --> C{"reconciliation OK<br/>and all lanes arrived?"}
+    Q -.-> C
+    C -- yes --> P["PUBLISHED<br/>flip ops.destination"]
+    C -- no --> H["HELD<br/>run fails"]
+    P --> CV["analytics.* / finance.* views"]
+    H -. "keep last good release" .-> CV
+
+    classDef ok fill:#e3f6e8,stroke:#2e7d32
+    classDef warn fill:#fff4d6,stroke:#c08a00
+    classDef bad fill:#fde2e1,stroke:#c62828
+    class A,D,SV,P,CV ok
+    class PK warn
+    class Q,RJ,H bad
+```
+
+- **Bronze** is append-only: one `bronze.arrival` row per delivery (SHA-256, schema version, `batch_id`, status) and the raw records in `bronze.record`.
+- **Silver** is typed 3NF; `customers` and `products` keep full history (SCD-2). A record that breaks a business rule (e.g. `quantity <= 0`) is rejected on its own; the rest of the file loads.
+- **Gold** is rebuilt as a new release each run. `publish_release` flips one pointer, so consumers switch atomically or not at all.
+
+The DAG is `json_medallion_pipeline` (weekdays 02:00 UTC, `catchup=False`); SQL lives in `dags/json_medallion_pipeline/sql/`, contracts in `schemas/`.
+
+## What to look at
 
 ```sql
-SELECT * FROM analytics.customer_summary;            -- includes release_version, released_at
-SELECT * FROM analytics.product_performance;         -- price_variance = order price - catalog price
-SELECT * FROM finance.daily_sales_by_category;
+SELECT * FROM analytics.customer_summary;                              -- consumer view, with release_version
+SELECT source, status, quarantine_reason FROM bronze.arrival ORDER BY arrival_id;
+SELECT entity_key, reason FROM silver.rejected_record;                 -- O1003: quantity -1 must be > 0
 SELECT release_version, status, hold_reason FROM ops.release ORDER BY release_id;
+SELECT order_item_id, source_file, bronze_payload FROM gold.v_trace_order_lines LIMIT 3;  -- gold -> raw JSON
 ```
 
-## Key design decisions
+The sample orders file is dirty on purpose: `O1002` is sent twice (deduplicated with a WARN) and `O1003` has a negative quantity (rejected).
 
-- **Append-only bronze, idempotent everywhere.** Bronze only inserts; a corrected file is a new arrival, and re-delivering identical bytes is a `DUPLICATE` that adds nothing. Silver versions a parent only when its hash changes, so replaying a delivery changes nothing. Gold builds delete and re-insert only their own `release_id`.
-- **Release gating instead of in-place overwrite.** Gold is built into a new release, checked, then published by flipping one pointer (`ops.destination.active_release_id`). Failed builds never reach consumers, and old releases stay queryable.
-- **Validate at the door.** JSON Schema per source (`dags/json_medallion_pipeline/schemas/`) plus a "no records" rule; failures are quarantined with the first error and its JSON path (e.g. `$.records[0].items[0].quantity`).
-- **SCD-2 silver with 3NF.** Nested arrays are unnested with `WITH ORDINALITY` into child tables; open-ended `specifications` are an EAV table so new keys need no migration. Money is `NUMERIC`, never float.
-- **Data-quality gates as tasks.** Silver null/unique/range/orphan checks and gold-to-silver reconciliation (scoped to the release being built) stop downstream work on failure and show in the UI, alongside PK / FK / CHECK constraints.
-- **Row-level lineage.** Silver and per-row gold tables carry `bronze_arrival_id` / `bronze_record_index`; the category aggregate carries a `bronze_lineage` JSONB array. `gold.v_trace_*` joins any gold row back to the arrival (file, SHA-256, DAG run) and its raw JSON.
-- **SQL-first with explicit per-source tasks.** Transforms live in `dags/json_medallion_pipeline/sql/**`, rendered with Airflow templating (`{{ ds }}`, `ti.xcom_pull`), favouring readability over a config-driven factory.
+## Try a failure
 
-```sql
-SELECT * FROM gold.v_trace_order_lines LIMIT 1;   -- gold row -> arrival (file, SHA-256, run) -> raw JSON
+```bash
+cp data/samples/scenarios/orders_bad_schema.json data/landing/orders.json   # quantity: "two"
+make trigger    # orders quarantined, release HELD, run fails; consumers keep the last release
+cp data/samples/orders.json data/landing/orders.json && make trigger        # recovers
 ```
+
+Every scenario (file-level, record-level, warning-only) is listed with its expected outcome in `data/samples/scenarios/manifest.json`.
+
+## Design decisions
+
+- **Immutable bronze:** a corrected file is a new arrival; identical bytes are a `DUPLICATE`, so reruns change nothing.
+- **Contract at the door, rules per record:** JSON Schema quarantines a broken file; business rules in silver SQL reject only the bad record.
+- **Release gating:** gold is built, reconciled against silver, then published by flipping `ops.destination`; a failed build never reaches consumers and rollback is a pointer change.
+- **History and lineage:** hash-gated SCD-2 in silver; every gold row resolves to its bronze record via `gold.v_trace_*`.
+- **Explicit over clever:** one readable DAG file with every task written out, SQL in files, `NUMERIC` money.
 
 ## Tests
 
 ```bash
 make test               # everything, inside the Airflow image
-make test-unit          # helper + DAG-integrity tests (no warehouse needed; ignores tests/local)
-make test-integration   # end-to-end SQL tests (12; stack must be up)
+make test-unit          # helpers, schemas, scenario files, DAG integrity (no database)
+make test-integration   # end-to-end SQL in a throwaway warehouse_test database
 ```
 
-Integration tests run in a throwaway `warehouse_test` database (created and dropped per session; the demo warehouse is untouched) and need the sample and scenario files in `data/samples/`; without them they are skipped. They cover: first release and values, lineage to the raw payload, rerun idempotency, SCD-2 versioning on a changed record, quarantine plus a held release, recovery after a fix, and the row-count WARN.
-
-## What to inspect
+## Layout
 
 ```
-dags/json_medallion_pipeline/   # the DAG, JSON Schemas, and all SQL (bronze/silver/gold/ops/checks)
-data/quarantine/                # rejected files, by source / date / run
-tests/                          # ingest helpers, DAG integrity, end-to-end SQL
-docker-compose.yml, Dockerfile  # metadata DB, warehouse, scheduler, webserver
+dags/json_medallion_pipeline/   # the DAG, schemas/ (JSON Schema), sql/ (bronze, silver, gold, ops, checks)
+data/samples/                   # input files and scenarios/ (one file per failure case + manifest.json)
+tests/                          # unit, DAG integrity, scenario and integration tests
+docker-compose.yml, Dockerfile  # Airflow (LocalExecutor), metadata Postgres, warehouse Postgres
 Makefile                        # make help
 ```
