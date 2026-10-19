@@ -1,6 +1,7 @@
--- Bronze: immutable raw landing. One table per source, schema-on-read via JSONB.
--- (logical_date, record_index) is the idempotency key: a rerun of a partition
--- deletes + reinserts it, so bronze always reflects the latest file for that day.
+-- Bronze: raw, replayable copy of each source file. One table per source, schema-on-read via JSONB.
+-- Grain: one row per source record, keyed (logical_date, record_index).
+-- Rerun: each logical_date partition is replaced (delete + insert in one transaction).
+-- Lineage: file name, sha256 and dag_run_id are stored with every row; silver/gold point back here.
 CREATE SCHEMA IF NOT EXISTS bronze;
 
 CREATE TABLE IF NOT EXISTS bronze.raw_products (

@@ -1,19 +1,26 @@
-"""Primary DAG: daily scheduled land -> bronze -> silver -> gold load of three JSON sources.
+"""Daily land -> bronze -> silver -> gold load of three JSON sources into Postgres.
 
-Self-contained on purpose: every task is written out explicitly so the whole pipeline can be
-read top to bottom in this one file.
+Self-contained on purpose: every task is written out in this file; the SQL lives in
+`sql/{bronze,silver,gold,checks,ops}/` next to it.
 
-Layers (all in the `warehouse_postgres` database):
-- **landing -> bronze files**: each source file in `data/landing/` is validated, then copied to
-  `data/bronze/<source>/dt=<ds>/<file>` (sha256 + record count captured).
-- **bronze (JSONB)**: one row per record in `bronze.raw_<source>`; the partition for the
-  logical date is deleted and re-inserted in a single transaction, so re-runs are idempotent.
-- **silver (3NF)**: `silver/*.sql` upserts normalized tables, followed by column-level checks.
-- **gold**: `gold/*.sql` full-refresh consumer models, followed by reconciliation checks.
-- **ops**: `record_load_audit` writes row counts for every layer into `ops.load_audit`.
+```
+setup_schemas
+  -> bronze.land_<src> -> bronze.load_<src> -> bronze.check_<src>
+  -> silver.transform_<src> -> silver.check_<src>
+  -> gold.build_<model> -> gold.check_*_reconciliation
+  -> record_load_audit
+```
 
-Each source is an independent lane (users never wait on products); gold models wait only
-for the silver lane they read from. Manual trigger: `make trigger`. Backfill: `make backfill`.
+Each source (`products`, `users`, `store_catalog`) is an independent lane; a gold model waits
+only for the silver lane(s) it reads.
+
+- **Idempotency**: landing overwrites `dt=<ds>`; bronze deletes + re-inserts the `<ds>`
+  partition in one transaction; silver upserts parents and replaces child rows; gold is a full
+  refresh; the audit row upserts per run.
+- **Lineage**: bronze rows keep file name, sha256 and `dag_run_id`. Silver and per-row gold
+  tables carry `bronze_logical_date`/`bronze_record_index`; the category aggregate carries a
+  `bronze_lineage` JSONB array. `gold.v_trace_*` views resolve gold rows back to bronze.
+- **Run it**: `make trigger` (one run) or `make backfill START=... END=...`.
 """
 from __future__ import annotations
 
@@ -21,6 +28,7 @@ import hashlib
 import json
 import os
 import shutil
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -61,14 +69,6 @@ GOLD_TABLES = [
     "gold.product_total_value",
 ]
 
-# Gold model -> silver lane(s) it depends on (enables per-lane parallelism).
-GOLD_DEPENDENCIES = {
-    "user_activity_summary": ["users"],
-    "product_total_value": ["products"],
-    "product_variation_flat": ["store_catalog"],
-    "inventory_value_by_category": ["store_catalog"],
-}
-
 default_args = {
     "owner": "data-eng",
     "retries": 2,
@@ -88,6 +88,7 @@ class LandedFile:
 
 
 def sha256_of_file(path: Path) -> str:
+    """Content hash stored in bronze, so a changed source file is provable per partition."""
     digest = hashlib.sha256()
     with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
@@ -123,8 +124,9 @@ def land_file(
 ) -> LandedFile:
     """Copy the landing file into <bronze_dir>/<source_name>/dt=<ds>/<landing_file>.
 
-    The payload is validated first so malformed files never reach bronze. Re-running the
-    same `ds` overwrites the partition, which keeps the file zone idempotent.
+    Validate before copy so a malformed file fails here and never reaches bronze. The copy is
+    partitioned by `ds` and overwritten on rerun, which keeps the file zone idempotent and
+    leaves the landing file untouched.
     """
     src = landing_dir / landing_file
     if not src.is_file():
@@ -163,18 +165,23 @@ def bronze_rows(
 
 
 def replace_bronze_partition(table: str, rows: list[tuple], ds: str) -> int:
-    """Delete the `ds` partition and insert `rows` in ONE transaction (idempotent load)."""
+    """Delete the `ds` partition and insert `rows` in ONE transaction (idempotent load).
+
+    A single transaction means a failed insert rolls the delete back, so a rerun can never
+    leave the partition empty or doubled. `closing` releases the connection; `with conn`
+    only scopes the transaction (commit/rollback).
+    """
     hook = PostgresHook(postgres_conn_id=WAREHOUSE_CONN_ID)
-    with hook.get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"DELETE FROM {table} WHERE logical_date = %s", (ds,))
-        execute_values(
-            cur,
-            f"INSERT INTO {table} "
-            "(logical_date, record_index, payload, source_file, file_sha256, dag_run_id) VALUES %s",
-            rows,
-            template="(%s, %s, %s::jsonb, %s, %s, %s)",
-        )
-        conn.commit()
+    with closing(hook.get_conn()) as conn:
+        with conn, conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {table} WHERE logical_date = %s", (ds,))
+            execute_values(
+                cur,
+                f"INSERT INTO {table} "
+                "(logical_date, record_index, payload, source_file, file_sha256, dag_run_id) VALUES %s",
+                rows,
+                template="(%s, %s, %s::jsonb, %s, %s, %s)",
+            )
     return len(rows)
 
 
@@ -247,15 +254,15 @@ def record_load_audit(ds: str | None = None, run_id: str | None = None) -> None:
     for table in GOLD_TABLES:
         counts.append(("gold", table, hook.get_first(f"SELECT COUNT(*) FROM {table}")[0]))
 
-    with hook.get_conn() as conn, conn.cursor() as cur:
-        execute_values(
-            cur,
-            "INSERT INTO ops.load_audit (dag_run_id, logical_date, layer, table_name, row_count) VALUES %s "
-            "ON CONFLICT (dag_run_id, layer, table_name) "
-            "DO UPDATE SET row_count = EXCLUDED.row_count, loaded_at = now()",
-            [(run_id, ds, layer, table, n) for layer, table, n in counts],
-        )
-        conn.commit()
+    with closing(hook.get_conn()) as conn:
+        with conn, conn.cursor() as cur:
+            execute_values(
+                cur,
+                "INSERT INTO ops.load_audit (dag_run_id, logical_date, layer, table_name, row_count) VALUES %s "
+                "ON CONFLICT (dag_run_id, layer, table_name) "
+                "DO UPDATE SET row_count = EXCLUDED.row_count, loaded_at = now()",
+                [(run_id, ds, layer, table, n) for layer, table, n in counts],
+            )
 
 
 # --------------------------------------------------------------------------------------
@@ -275,7 +282,7 @@ with DAG(
 ) as dag:
     setup_schemas = _sql(
         "setup_schemas",
-        sql=["bronze/ddl.sql", "silver/ddl.sql", "gold/ddl.sql", "ops/ddl.sql"],
+        sql=["bronze/ddl.sql", "silver/ddl.sql", "gold/ddl.sql", "gold/trace_views.sql", "ops/ddl.sql"],
     )
 
     # ---- bronze: land files, load JSONB partitions, check row counts -----------------
@@ -379,7 +386,7 @@ with DAG(
             sql="checks/gold_catalog_reconciliation.sql",
         )
 
-    # Mirrors GOLD_DEPENDENCIES: each gold model waits only for the silver lane it reads.
+    # Each gold model waits only for the silver lane(s) it reads.
     check_silver_users >> build_user_activity_summary
     check_silver_products >> build_product_total_value
     check_silver_store_catalog >> [build_product_variation_flat, build_inventory_value_by_category]

@@ -1,8 +1,10 @@
-"""End-to-end SQL test against the real warehouse (run via `make test-integration`).
+"""End-to-end SQL test of bronze -> silver -> gold in a throwaway `warehouse_test` database.
 
-Replays the exact DAG steps - DDL, bronze load, silver transforms, gold builds, checks -
-through psycopg2 using the same helpers and .sql files the DAG uses, then asserts the
-expected outputs from the sample files and proves the loads are idempotent.
+The `warehouse_test_dsn` fixture creates and drops that database, so the demo warehouse is
+never touched. The test replays the DAG steps - DDL, bronze load, silver transforms, gold
+builds, checks - through psycopg2 using the same helpers and .sql files the DAG uses, asserts
+the expected outputs from `data/samples/`, and proves the loads are idempotent. It is skipped
+when the sample files or the warehouse connection are not available.
 """
 from __future__ import annotations
 
@@ -77,27 +79,21 @@ def run_silver_and_gold(conn, sql_dir: Path) -> None:
 
 
 @pytest.fixture(scope="module")
-def conn(warehouse_dsn):
-    c = psycopg2.connect(warehouse_dsn)
+def conn(warehouse_test_dsn):
+    c = psycopg2.connect(warehouse_test_dsn)
     yield c
     c.close()
 
 
 @pytest.fixture(scope="module", autouse=True)
 def pipeline(conn, sql_dir, pipeline_module, samples_dir, tmp_path_factory):
-    for ddl in ("bronze/ddl.sql", "silver/ddl.sql", "gold/ddl.sql", "ops/ddl.sql"):
+    for ddl in ("bronze/ddl.sql", "silver/ddl.sql", "gold/ddl.sql", "gold/trace_views.sql", "ops/ddl.sql"):
         run_sql_file(conn, sql_dir, ddl)
 
     bronze_dir = tmp_path_factory.mktemp("bronze")
     load_bronze(conn, pipeline_module, samples_dir, bronze_dir)
     run_silver_and_gold(conn, sql_dir)
-    yield sql_dir
-
-    # Leave silver/gold (they are upsert/full-refresh state) but drop our bronze partition.
-    with conn.cursor() as cur:
-        for *_, bronze_table, _silver in SOURCES:
-            cur.execute(f"DELETE FROM {bronze_table} WHERE logical_date = %s", (DS,))
-    conn.commit()
+    return sql_dir
 
 
 def test_bronze_partition_counts(conn):
@@ -200,6 +196,10 @@ def test_rerun_is_idempotent(conn, pipeline, pipeline_module, samples_dir, tmp_p
             "silver.variation_specifications",
             "gold.user_activity_summary",
             "gold.product_variation_flat",
+            "gold.v_trace_product_total_value",
+            "gold.v_trace_product_variation_flat",
+            "gold.v_trace_user_activity_summary",
+            "gold.v_trace_inventory_value_by_category",
         )
     }
     load_bronze(conn, pipeline_module, samples_dir, tmp_path)
@@ -207,3 +207,77 @@ def test_rerun_is_idempotent(conn, pipeline, pipeline_module, samples_dir, tmp_p
     after = {t: scalar(conn, f"SELECT COUNT(*) FROM {t}") for t in before}
     assert after == before
     assert scalar(conn, f"SELECT COUNT(*) FROM bronze.raw_users WHERE logical_date = '{DS}'") == 2
+
+
+# silver table -> bronze table its rows are derived from
+SILVER_TO_BRONZE = [
+    ("silver.products", "bronze.raw_products"),
+    ("silver.users", "bronze.raw_users"),
+    ("silver.user_activities", "bronze.raw_users"),
+    ("silver.stores", "bronze.raw_store_catalog"),
+    ("silver.store_products", "bronze.raw_store_catalog"),
+    ("silver.product_variations", "bronze.raw_store_catalog"),
+    ("silver.variation_specifications", "bronze.raw_store_catalog"),
+]
+
+
+@pytest.mark.parametrize("silver_table,bronze_table", SILVER_TO_BRONZE)
+def test_silver_rows_reference_existing_bronze_records(conn, silver_table, bronze_table):
+    assert scalar(conn, f"SELECT COUNT(*) FROM {silver_table}") > 0
+    orphans = scalar(
+        conn,
+        f"SELECT COUNT(*) FROM {silver_table} s WHERE NOT EXISTS ("
+        f"SELECT 1 FROM {bronze_table} b "
+        "WHERE b.logical_date = s.bronze_logical_date AND b.record_index = s.bronze_record_index)",
+    )
+    assert orphans == 0
+
+
+def test_trace_user_activity_summary_reaches_raw_user(conn):
+    (alice,) = rows(
+        conn,
+        "SELECT source_table, payload->>'name', source_file IS NOT NULL, file_sha256 IS NOT NULL "
+        "FROM gold.v_trace_user_activity_summary WHERE user_id = 1",
+    )
+    assert alice == ("raw_users", "Alice", True, True)
+    # the summary carries the user's own bronze_* columns, so each row traces to exactly one record
+    assert rows(
+        conn,
+        "SELECT bronze_logical_date::TEXT, bronze_record_index FROM gold.user_activity_summary ORDER BY user_id",
+    ) == [(DS, 0), (DS, 1)]
+    # every summary row traces to a raw user record carrying the same name
+    assert scalar(conn, "SELECT COUNT(*) FROM gold.user_activity_summary") == scalar(
+        conn, "SELECT COUNT(*) FROM gold.v_trace_user_activity_summary"
+    )
+    assert scalar(conn, "SELECT COUNT(*) FROM gold.v_trace_user_activity_summary WHERE payload->>'name' <> name") == 0
+
+
+def test_trace_product_total_value_reaches_raw_product(conn):
+    assert rows(
+        conn,
+        "SELECT product_id, payload->>'name' FROM gold.v_trace_product_total_value ORDER BY 1",
+    ) == [(1, "Product_A"), (2, "Product_B"), (3, "Product_C"), (4, "Product_D")]
+    assert scalar(conn, f"SELECT COUNT(*) FROM gold.v_trace_product_total_value WHERE logical_date <> '{DS}'") == 0
+
+
+def test_trace_product_variation_flat_reaches_raw_store(conn):
+    result = rows(
+        conn,
+        "SELECT product_id, variation_seq, payload->>'name' FROM gold.v_trace_product_variation_flat ORDER BY 1, 2",
+    )
+    assert result == [("p1", 1, "SuperMart"), ("p1", 2, "SuperMart"), ("p2", 1, "SuperMart"), ("p2", 2, "SuperMart")]
+
+
+def test_trace_inventory_value_by_category_reaches_raw_store(conn):
+    # aggregates trace to every contributing record: no gold row may be left untraceable
+    untraceable = scalar(
+        conn,
+        "SELECT COUNT(*) FROM gold.inventory_value_by_category g WHERE NOT EXISTS ("
+        "SELECT 1 FROM gold.v_trace_inventory_value_by_category v "
+        "WHERE v.store_name = g.store_name AND v.product_category = g.product_category)",
+    )
+    assert untraceable == 0
+    assert rows(
+        conn,
+        "SELECT DISTINCT product_category, payload->>'name' FROM gold.v_trace_inventory_value_by_category ORDER BY 1",
+    ) == [("Apparel", "SuperMart"), ("Electronics", "SuperMart")]

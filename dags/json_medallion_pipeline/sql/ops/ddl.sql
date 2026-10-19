@@ -1,4 +1,6 @@
--- Operational metadata: one row per (run, layer, table) with the row count after load.
+-- Operational metadata. Grain: one row per (dag_run_id, layer, table_name) with the row count after load.
+-- Rerun: the audit task upserts on that key, so retrying a run never duplicates rows.
+-- Lineage: none; this table only describes runs.
 CREATE SCHEMA IF NOT EXISTS ops;
 
 CREATE TABLE IF NOT EXISTS ops.load_audit (

@@ -1,17 +1,11 @@
 # airflow_json-medallion-pipeline
 
-An end-to-end JSON pipeline built with **Apache Airflow 2.11** and **PostgreSQL**, organized
-into **Bronze → Silver → Gold** (medallion) layers.
+An end-to-end JSON pipeline on **Apache Airflow 2.11** and **PostgreSQL**, organized into
+**Bronze → Silver → Gold** layers. Three nested JSON documents (`products`, `users`, `store`)
+are landed, loaded raw, normalized to 3NF, and rolled up into analytics models, with
+data-quality gates, idempotent reruns, an audit trail and row-level lineage. Runs locally in Docker.
 
-Three nested JSON documents (`products`, `users`, `store`) are landed as hosted files, loaded
-raw, normalized into 3NF relational tables, and rolled up into analytics-ready models — with
-data-quality checks, idempotent reruns, an audit trail and a test suite. Everything runs
-locally in Docker.
-
-**Stack:** Airflow (LocalExecutor) · Postgres (separate metadata DB and warehouse) · SQL-first
-transforms · `apache-airflow-providers-common-sql` checks · pytest · Docker Compose.
-
----
+**Stack:** Airflow (LocalExecutor) · Postgres (separate metadata DB and warehouse) · SQL-first transforms · pytest · Docker Compose.
 
 ## Architecture
 
@@ -60,119 +54,69 @@ flowchart LR
 
 | Layer | Storage | Contract |
 |---|---|---|
-| **Landing** | `data/landing/*.json` | Files as delivered. Nothing here is trusted. |
-| **Bronze** | `data/bronze/<source>/dt=<ds>/` + `bronze.raw_<source>` (JSONB, one row per record) | Immutable, replayable copy of what arrived, keyed by `(logical_date, record_index)`. Schema-on-read. |
-| **Silver** | `silver.*` | Typed, deduplicated, normalized (3NF) tables with PK / FK / CHECK constraints. Business keys, no aggregation. |
-| **Gold** | `gold.*` | Denormalized, question-shaped models, rebuilt each run from silver. |
-| **Ops** | `ops.load_audit` | Row counts per layer / table per DAG run. |
+| **Landing** | `data/landing/*.json` | Files as delivered; untrusted. |
+| **Bronze** | `bronze.raw_<source>` (JSONB) + `data/bronze/<source>/dt=<ds>/` | Raw, replayable copy, one row per record, keyed `(logical_date, record_index)`; each `logical_date` partition is replaced on rerun. |
+| **Silver** | `silver.*` | Typed, deduplicated 3NF tables with PK / FK / CHECK. Each row carries `bronze_logical_date` / `bronze_record_index`. |
+| **Gold** | `gold.*` | Question-shaped models rebuilt each run. Every gold row traces to its bronze record via `gold.v_trace_*`. |
+| **Ops** | `ops.load_audit` | Row counts per layer, table and DAG run. |
 
-Each source gets its own lane inside three `TaskGroup`s (bronze / silver / gold), so a failure
-in one source does not block the others.
+`json_medallion_pipeline` runs `@daily` (`catchup=False`, `max_active_runs=1`); trigger it manually with `make trigger`.
 
-### DAGs
+## Prerequisites
 
-| DAG | Trigger |
-|---|---|
-| `json_medallion_pipeline` | `@daily` schedule (`catchup=False`, `max_active_runs=1`) |
-| `json_medallion_pipeline_filesensor` | file arrival — same task graph, gated by three `FileSensor`s |
+- Docker Engine with Compose v2 (`docker compose`) via Docker Desktop, Rancher Desktop, or Docker Engine on Linux; ~4 GB RAM for the VM/engine; GNU `make`. No local Python needed (tests run in the image).
+- Free host ports 8080 (UI) and 5433 (warehouse), or set `AIRFLOW_PORT` / `WAREHOUSE_PORT` in `.env`.
+- Rancher Desktop: choose the **dockerd (moby)** container engine (Preferences > Container Engine; containerd/nerdctl has no `docker compose`) and make sure `docker context show` prints `rancher-desktop`.
+- Linux Docker Engine: set `AIRFLOW_UID=$(id -u)` in `.env` if you hit permission errors on `logs/` or `data/`.
 
-Both are self-contained single files with explicit per-source tasks (some deliberate
-duplication) in favour of readability over a config-driven factory. Unpause only one of them.
+## Quickstart
 
----
+Input files are not generated for you: provide `products.json`, `users.json` and `store.json` in `data/landing/`.
+
+- `products.json`: flat list of `{id, name, category, price, quantity}`
+- `users.json`: `{"users": [{id, name, profile: {age, email, activities: [{type, duration_minutes}]}}]}`
+- `store.json`: `{"store": {name, location, products: [{id, name, category, variations: [...]}]}}`
+
+```bash
+make up        # create .env, build, migrate, start the stack (copies samples into data/landing only if present)
+make trigger   # unpause + run json_medallion_pipeline once
+make psql      # query the warehouse
+```
+
+- **Airflow UI:** http://localhost:8080 (`airflow` / `airflow`)
+- **Warehouse:** `postgresql://warehouse:warehouse@localhost:5433/warehouse`
+- Ports come from `.env` (`AIRFLOW_PORT`, `WAREHOUSE_PORT`; defaults 8080 / 5433); edit and re-run `make up` if they clash.
+- On Docker socket errors with Rancher Desktop, restart Rancher Desktop.
+
+Other targets (`make help`): `down`, `restart`, `logs`, `ps`, `seed`, `unpause`, `backfill START=… END=…`, `clean`, `reset` (wipes DB volumes).
 
 ## Key design decisions
 
-- **Idempotency at every layer.** Bronze: delete-then-insert the `logical_date` partition
-  (plus `UNIQUE(logical_date, record_index)`). Silver: upsert parents on natural keys, replace
-  children scoped to the parents in the batch, all in a single transaction. Gold:
-  `TRUNCATE + INSERT` in one transaction. Audit: upsert on `(dag_run_id, layer, table_name)`.
-  Re-running a task, run or date range leaves the warehouse in the same state.
-- **Normalization.** Nested arrays are unnested with `jsonb_array_elements … WITH ORDINALITY`
-  into child tables keyed by parent + ordinal. The open-ended `specifications` object is stored
-  as an **EAV** child table, so new spec keys need no migration; fixed attributes stay typed.
-  Money is `NUMERIC(12,2)`, never float.
-- **Data quality as tasks.** Failed checks stop downstream layers and show in the UI:
-  bronze partition row count > 0 (`SQLTableCheckOperator`); silver null / unique /
-  non-negative checks (`SQLColumnCheckOperator`); gold ↔ silver reconciliation
-  (`SQLCheckOperator`); plus PK / FK / UNIQUE / CHECK constraints and pre-load file / JSON /
-  `record_path` validation.
-- **Auditability.** The landed file's SHA-256, source path and DAG run id are stored with every
-  bronze row, and per-run row counts land in `ops.load_audit`.
-- **SQL-first.** All transforms live in `dags/json_medallion_pipeline/sql/**`, rendered with
-  Airflow templating (`{{ ds }}`).
-- **Two Postgres instances on purpose:** Airflow metadata and the warehouse never share a database.
-
-### Gold models
-
-| Model | Grain |
-|---|---|
-| `gold.user_activity_summary` | one row per user (activity count, total minutes) |
-| `gold.product_total_value` | one row per product (`price * quantity`) |
-| `gold.product_variation_flat` | one row per variation, specs pivoted to columns |
-| `gold.inventory_value_by_category` | one row per store × category |
-
----
-
-## Running locally
-
-**Prerequisites:** Docker Engine + Compose v2 (Rancher Desktop or Docker Desktop), `make`, and
-free ports **8080** (Airflow UI) and **5433** (warehouse). No local Python needed; tests run in
-the Airflow image.
-
-The input JSON files are **not included in the repository**. Provide your own
-`products.json`, `users.json` and `store.json` in `data/landing/` (git-ignored):
-
-- `products.json` — flat list of `{id, name, category, price, quantity}`
-- `users.json` — `{ "users": [ {id, name, profile: {age, email, activities: [{type, duration_minutes}]}} ] }`
-- `store.json` — `{ "store": {name, location, products: [ {id, name, category, variations: [...]} ]} }`
-
-```bash
-make init              # .env from template, runtime dirs, build image, migrate Airflow DB
-# place products.json, users.json, store.json in data/landing/
-docker compose up -d   # start the stack
-make trigger           # unpause + trigger one run of json_medallion_pipeline
-```
-
-> `make up` also starts the stack but first runs `make seed`, which copies
-> `data/samples/*.json` into `data/landing/`; use it only if you keep sample files at that path.
-
-- **Airflow UI:** http://localhost:8080 (`airflow` / `airflow`)
-- **Warehouse:** `make psql`, or `postgresql://warehouse:warehouse@localhost:5433/warehouse`
+- **Idempotent at every layer.** Bronze delete-then-inserts the `logical_date` partition; silver upserts on natural keys in one transaction; gold is `TRUNCATE + INSERT` in one transaction; the audit upserts per run. Reruns and backfills leave the same state.
+- **3NF with EAV for open specs.** Nested arrays are unnested with `WITH ORDINALITY` into child tables; open-ended `specifications` are an EAV table so new keys need no migration. Money is `NUMERIC`, never float.
+- **Data-quality gates as tasks.** Bronze row counts, silver null/unique/range checks and gold-to-silver reconciliation stop downstream layers on failure and show in the UI, alongside PK/FK/CHECK constraints.
+- **Row-level lineage and audit.** Silver and per-row gold tables carry `bronze_logical_date` / `bronze_record_index`; the category aggregate carries a `bronze_lineage` JSONB array. Bronze stores source file, SHA-256 and DAG run id. `gold.v_trace_*` joins any gold row back to its raw JSON.
+- **SQL-first with explicit per-source tasks.** Transforms live in `dags/json_medallion_pipeline/sql/**`, rendered with Airflow templating, favouring readability over a config-driven factory.
 
 ```sql
-SELECT * FROM gold.user_activity_summary;
-SELECT * FROM gold.inventory_value_by_category;
-SELECT * FROM ops.load_audit ORDER BY audit_id DESC LIMIT 20;
+SELECT user_id, name, source_file, file_sha256, payload FROM gold.v_trace_user_activity_summary WHERE user_id = 1;
 ```
-
-Useful targets (`make help` lists all): `make down`, `make logs`, `make ps`, `make psql`,
-`make backfill START=2026-10-01 END=2026-10-03` (re-run a date range to see idempotency),
-`make clean` (remove landed / bronze files and logs), `make reset` (full wipe incl. DB volumes).
-
----
 
 ## Tests
 
 ```bash
-make test               # all tests, inside the Airflow image
+make test               # everything, inside the Airflow image
 make test-unit          # helper + DAG-integrity tests (no warehouse needed)
-make test-integration   # end-to-end SQL tests against the running warehouse (stack must be up)
+make test-integration   # end-to-end SQL tests incl. rerun idempotency and lineage (stack must be up)
 ```
 
-| File | Covers |
-|---|---|
-| `tests/test_ingest.py` | record extraction for flat / nested / single-object documents, error paths, landing path + checksum, overwrite on rerun, bronze row shaping |
-| `tests/test_dag_integrity.py` | DagBag loads cleanly; expected task ids and dependencies; DAG settings; FileSensor gating; referenced SQL files exist |
-| `tests/test_pipeline_integration.py` | DDL → bronze → silver → gold for a fixture date; asserts exact values, reconciliation checks, and that a **second run leaves every count unchanged** |
-
----
+Integration tests run in a throwaway `warehouse_test` database (created and dropped per session; the demo warehouse is untouched) and need the three sample files in `data/samples/`; without them they are skipped.
 
 ## What to inspect
 
 ```
-dags/json_medallion_pipeline/   # scheduled + file-arrival DAGs and all SQL (bronze/silver/gold/ops/checks)
+dags/json_medallion_pipeline/   # the DAG and all SQL (bronze/silver/gold/ops/checks, gold/trace_views.sql)
 tests/                          # ingest helpers, DAG integrity, end-to-end SQL
-docker-compose.yml, Dockerfile  # metadata DB, warehouse, scheduler, webserver (Airflow 2.11)
+docker-compose.yml, Dockerfile  # metadata DB, warehouse, scheduler, webserver
 Makefile                        # make help
 ```

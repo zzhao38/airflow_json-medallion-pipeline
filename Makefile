@@ -35,13 +35,21 @@ logs: ## Tail scheduler + webserver logs
 ps: ## Show container status
 	$(COMPOSE) ps
 
-seed: ## Copy sample JSON into the landing zone (data/landing)
+seed: ## Copy sample JSON into data/landing if present (never overwrites; no-op if no samples)
 	@mkdir -p data/landing
-	cp data/samples/*.json data/landing/
+	@if ls data/samples/*.json >/dev/null 2>&1; then \
+		for f in data/samples/*.json; do \
+			[ -e "data/landing/$$(basename "$$f")" ] || cp "$$f" data/landing/ || exit 1; \
+		done; \
+	else \
+		echo "No samples in data/samples/. Supply products.json, users.json and store.json in data/landing/ before triggering the DAG."; \
+	fi
 	@ls -1 data/landing
 
+# reserialize registers the DAG in the metadata DB now, so this works right after `make up`
+# without waiting for the scheduler's next folder scan.
 unpause: ## Unpause the main DAG
-	$(CLI) airflow dags unpause $(DAG_ID)
+	$(CLI) bash -c "airflow dags reserialize && airflow dags unpause $(DAG_ID)"
 
 trigger: unpause ## Trigger one run of the main DAG
 	$(CLI) airflow dags trigger $(DAG_ID)
@@ -60,7 +68,7 @@ test: test-unit test-integration ## Run all tests
 test-unit: ## Unit + DAG-integrity tests (no warehouse needed)
 	$(CLI) python -m pytest -m "not integration" /opt/airflow/tests
 
-test-integration: ## End-to-end SQL tests against the warehouse (stack must be up)
+test-integration: ## End-to-end SQL tests in a throwaway warehouse_test DB (skipped without data/samples/*.json)
 	$(COMPOSE) run --rm airflow-cli python -m pytest -m integration /opt/airflow/tests
 
 clean: ## Remove landed/bronze files and logs (keeps DB volumes)

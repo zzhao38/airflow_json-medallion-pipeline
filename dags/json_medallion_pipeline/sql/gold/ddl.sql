@@ -1,5 +1,8 @@
 -- Gold: consumer-ready data products. Small aggregates -> full refresh each run
 -- (TRUNCATE + INSERT inside one transaction, so readers never see a half-built table).
+-- Lineage: per-row models (one bronze record each) carry (bronze_logical_date, bronze_record_index);
+-- only inventory_value_by_category, a many-record aggregate, carries bronze_lineage, a JSONB array
+-- of {logical_date, record_index}. See trace_views.sql.
 CREATE SCHEMA IF NOT EXISTS gold;
 
 CREATE TABLE IF NOT EXISTS gold.user_activity_summary (
@@ -8,6 +11,8 @@ CREATE TABLE IF NOT EXISTS gold.user_activity_summary (
     email                   TEXT        NOT NULL,
     activity_count          INTEGER     NOT NULL,
     total_activity_duration INTEGER     NOT NULL,
+    bronze_logical_date     DATE        NOT NULL,
+    bronze_record_index     INTEGER     NOT NULL,
     refreshed_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -25,6 +30,8 @@ CREATE TABLE IF NOT EXISTS gold.product_variation_flat (
     variation_specifications_storage TEXT,
     variation_price                  NUMERIC(12, 2) NOT NULL,
     variation_inventory              INTEGER        NOT NULL,
+    bronze_logical_date              DATE           NOT NULL,
+    bronze_record_index              INTEGER        NOT NULL,
     refreshed_at                     TIMESTAMPTZ    NOT NULL DEFAULT now(),
     PRIMARY KEY (product_id, variation_seq)
 );
@@ -37,6 +44,7 @@ CREATE TABLE IF NOT EXISTS gold.inventory_value_by_category (
     total_inventory  BIGINT         NOT NULL,
     inventory_value  NUMERIC(14, 2) NOT NULL,
     avg_price        NUMERIC(12, 2) NOT NULL,
+    bronze_lineage   JSONB          NOT NULL,
     refreshed_at     TIMESTAMPTZ    NOT NULL DEFAULT now(),
     PRIMARY KEY (store_name, product_category)
 );
@@ -46,5 +54,7 @@ CREATE TABLE IF NOT EXISTS gold.product_total_value (
     name         TEXT           NOT NULL,
     category     TEXT           NOT NULL,
     total_value  NUMERIC(14, 2) NOT NULL,
+    bronze_logical_date DATE    NOT NULL,
+    bronze_record_index INTEGER NOT NULL,
     refreshed_at TIMESTAMPTZ    NOT NULL DEFAULT now()
 );

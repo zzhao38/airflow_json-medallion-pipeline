@@ -13,6 +13,22 @@ SPECS = {
 }
 SOURCE_NAMES = list(SPECS)
 
+# Minimal documents in each source's shape; unit tests must not depend on data/samples/.
+DOCS = {
+    "products.json": [{"id": 1}, {"id": 2}],
+    "users.json": {"users": [{"id": 1}, {"id": 2}, {"id": 3}]},
+    "store.json": {"store": {"name": "SuperMart", "products": []}},
+}
+
+
+@pytest.fixture
+def landing_dir(tmp_path: Path) -> Path:
+    landing = tmp_path / "landing"
+    landing.mkdir()
+    for file_name, doc in DOCS.items():
+        (landing / file_name).write_text(json.dumps(doc))
+    return landing
+
 
 @pytest.fixture
 def impl(pipeline_module):
@@ -55,24 +71,24 @@ class TestExtractRecords:
 
 
 class TestLandFile:
-    def test_lands_into_partition_and_hashes(self, impl, tmp_path: Path, samples_dir: Path):
+    def test_lands_into_partition_and_hashes(self, impl, tmp_path: Path, landing_dir: Path):
         bronze = tmp_path / "bronze"
 
-        landed = impl.land("users", samples_dir, bronze, "2024-01-01")
+        landed = impl.land("users", landing_dir, bronze, "2024-01-01")
 
         dest = bronze / "users" / "dt=2024-01-01" / "users.json"
         assert Path(landed.bronze_path) == dest
         assert dest.is_file()
-        assert landed.sha256 == impl.sha256_of_file(samples_dir / "users.json")
+        assert landed.sha256 == impl.sha256_of_file(landing_dir / "users.json")
         assert (landed.source_name, landed.source_file) == ("users", "users.json")
 
-    def test_store_catalog_keeps_landing_file_name(self, impl, tmp_path: Path, samples_dir: Path):
-        landed = impl.land("store_catalog", samples_dir, tmp_path, "2024-01-01")
+    def test_store_catalog_keeps_landing_file_name(self, impl, tmp_path: Path, landing_dir: Path):
+        landed = impl.land("store_catalog", landing_dir, tmp_path, "2024-01-01")
         assert Path(landed.bronze_path) == tmp_path / "store_catalog" / "dt=2024-01-01" / "store.json"
 
-    def test_rerun_overwrites_partition(self, impl, tmp_path: Path, samples_dir: Path):
-        first = impl.land("products", samples_dir, tmp_path, "2024-01-01")
-        second = impl.land("products", samples_dir, tmp_path, "2024-01-01")
+    def test_rerun_overwrites_partition(self, impl, tmp_path: Path, landing_dir: Path):
+        first = impl.land("products", landing_dir, tmp_path, "2024-01-01")
+        second = impl.land("products", landing_dir, tmp_path, "2024-01-01")
         assert first == second
         assert len(list((tmp_path / "products" / "dt=2024-01-01").iterdir())) == 1
 
@@ -99,8 +115,8 @@ class TestLandFile:
 
 class TestBronzeRows:
     @pytest.mark.parametrize("name", SOURCE_NAMES)
-    def test_one_row_per_record(self, impl, tmp_path: Path, samples_dir: Path, name: str):
-        landed = impl.land(name, samples_dir, tmp_path, "2024-01-01")
+    def test_one_row_per_record(self, impl, tmp_path: Path, landing_dir: Path, name: str):
+        landed = impl.land(name, landing_dir, tmp_path, "2024-01-01")
         rows = impl.rows(landed, name, "2024-01-01", "manual__test")
 
         assert rows, "sample must yield at least one record"
@@ -111,9 +127,9 @@ class TestBronzeRows:
             )
             assert isinstance(json.loads(payload), dict)
 
-    def test_sample_record_counts(self, impl, tmp_path: Path, samples_dir: Path):
+    def test_record_counts_per_shape(self, impl, tmp_path: Path, landing_dir: Path):
         counts = {
-            name: len(impl.rows(impl.land(name, samples_dir, tmp_path, "2024-01-01"), name, "2024-01-01", "r"))
+            name: len(impl.rows(impl.land(name, landing_dir, tmp_path, "2024-01-01"), name, "2024-01-01", "r"))
             for name in SOURCE_NAMES
         }
-        assert counts == {"products": 4, "users": 2, "store_catalog": 1}
+        assert counts == {"products": 2, "users": 3, "store_catalog": 1}

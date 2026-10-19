@@ -2,9 +2,7 @@
 import pytest
 from airflow.models import DagBag
 
-MAIN_DAG_ID = "json_medallion_pipeline"
-FILESENSOR_DAG_ID = "json_medallion_pipeline_filesensor"
-EXPECTED_DAG_IDS = {MAIN_DAG_ID, FILESENSOR_DAG_ID}
+DAG_ID = "json_medallion_pipeline"
 
 
 @pytest.fixture(scope="module")
@@ -12,17 +10,20 @@ def dagbag(pipeline_dir) -> DagBag:
     return DagBag(dag_folder=str(pipeline_dir), include_examples=False)
 
 
+@pytest.fixture(scope="module")
+def dag(dagbag: DagBag):
+    return dagbag.get_dag(DAG_ID)
+
+
 def test_no_import_errors(dagbag: DagBag):
     assert dagbag.import_errors == {}, f"DAG import errors: {dagbag.import_errors}"
 
 
 def test_expected_dags_present(dagbag: DagBag):
-    assert set(dagbag.dag_ids) == EXPECTED_DAG_IDS
+    assert set(dagbag.dag_ids) == {DAG_ID}
 
 
-@pytest.mark.parametrize("dag_id", sorted(EXPECTED_DAG_IDS))
-def test_dag_basics(dagbag: DagBag, dag_id: str):
-    dag = dagbag.get_dag(dag_id)
+def test_dag_basics(dag):
     assert dag is not None
     assert dag.catchup is False
     assert dag.max_active_runs == 1
@@ -31,9 +32,7 @@ def test_dag_basics(dagbag: DagBag, dag_id: str):
     assert dag.template_searchpath and dag.template_searchpath[0].endswith("/sql")
 
 
-@pytest.mark.parametrize("dag_id", sorted(EXPECTED_DAG_IDS))
-def test_dag_structure(dagbag: DagBag, dag_id: str):
-    dag = dagbag.get_dag(dag_id)
+def test_dag_structure(dag):
     task_ids = set(dag.task_ids)
 
     assert "setup_schemas" in task_ids
@@ -50,59 +49,56 @@ def test_dag_structure(dagbag: DagBag, dag_id: str):
         assert f"gold.build_{model}" in task_ids
 
     # Lane isolation: the users lane never waits on the products lane.
-    silver_users = dag.get_task("silver.transform_users")
-    assert silver_users.upstream_task_ids == {"bronze.check_users"}
+    assert dag.get_task("silver.transform_users").upstream_task_ids == {"bronze.check_users"}
 
-    # Gold depends only on the silver it reads from.
-    flat = dag.get_task("gold.build_product_variation_flat")
-    assert flat.upstream_task_ids == {"silver.check_store_catalog"}
+    # Each gold model waits only for the silver lane it reads.
+    gold_upstream = {
+        "gold.build_user_activity_summary": {"silver.check_users"},
+        "gold.build_product_total_value": {"silver.check_products"},
+        "gold.build_product_variation_flat": {"silver.check_store_catalog"},
+        "gold.build_inventory_value_by_category": {"silver.check_store_catalog"},
+    }
+    for task_id, expected in gold_upstream.items():
+        assert dag.get_task(task_id).upstream_task_ids == expected, task_id
 
     # The audit is the single sink.
     leaves = {t.task_id for t in dag.tasks if not t.downstream_task_ids}
     assert leaves == {"record_load_audit"}
 
 
-def test_scheduled_dag_root_is_setup(dagbag: DagBag):
-    dag = dagbag.get_dag(MAIN_DAG_ID)
+def test_setup_creates_lineage_trace_views(dag):
+    sql = dag.get_task("setup_schemas").sql
+    text = "\n".join(sql) if isinstance(sql, list) else sql
+    for view in ("product_total_value", "product_variation_flat", "user_activity_summary", "inventory_value_by_category"):
+        assert f"gold.v_trace_{view}" in text
+
+
+def test_dag_root_is_setup(dag):
     roots = {t.task_id for t in dag.tasks if not t.upstream_task_ids}
     assert roots == {"setup_schemas"}
 
 
-def test_filesensor_dag_gates_setup(dagbag: DagBag):
-    dag = dagbag.get_dag(FILESENSOR_DAG_ID)
-    setup = dag.get_task("setup_schemas")
-    assert setup.upstream_task_ids == {
-        "wait_for_products",
-        "wait_for_users",
-        "wait_for_store_catalog",
-    }
-    sensor = dag.get_task("wait_for_users")
-    assert sensor.mode == "reschedule"
-    assert sensor.fs_conn_id == "fs_landing"
-
-
-def test_sql_files_exist(sql_dir, pipeline_module):
+def test_sql_files_exist(sql_dir):
     """Every SQL path the pipeline references must resolve under sql/."""
-    refs = ["bronze/ddl.sql", "silver/ddl.sql", "gold/ddl.sql", "ops/ddl.sql"]
+    refs = ["bronze/ddl.sql", "silver/ddl.sql", "gold/ddl.sql", "gold/trace_views.sql", "ops/ddl.sql"]
     refs += ["checks/gold_activity_reconciliation.sql", "checks/gold_catalog_reconciliation.sql"]
     refs += [f"silver/{name}.sql" for name in ("products", "users", "store_catalog")]
-    refs += [f"gold/{m}.sql" for m in pipeline_module.GOLD_DEPENDENCIES]
+    refs += [
+        "gold/user_activity_summary.sql",
+        "gold/product_total_value.sql",
+        "gold/product_variation_flat.sql",
+        "gold/inventory_value_by_category.sql",
+    ]
 
     assert [p for p in refs if not (sql_dir / p).is_file()] == []
 
 
-def test_filesensor_gold_dependencies_match(pipeline_module, filesensor_module):
-    assert filesensor_module.GOLD_DEPENDENCIES == pipeline_module.GOLD_DEPENDENCIES
-
-
-@pytest.mark.parametrize("dag_id", sorted(EXPECTED_DAG_IDS))
-def test_sql_templates_resolved_at_parse_time(dagbag: DagBag, dag_id: str):
+def test_sql_templates_resolved_at_parse_time(dag):
     """DagBag resolves `template_ext` file references via template_searchpath.
 
     If a path were misspelled or outside the searchpath, the operator's `sql`
     would still be the literal '<path>.sql' string instead of SQL text.
     """
-    dag = dagbag.get_dag(dag_id)
     unresolved = []
     for t in dag.tasks:
         sql = getattr(t, "sql", None)

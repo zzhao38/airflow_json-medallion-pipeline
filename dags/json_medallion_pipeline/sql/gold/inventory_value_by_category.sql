@@ -1,9 +1,12 @@
 -- Inventory position per store x category (price * on-hand across all variations).
+-- Grain/key: (store_name, product_category). Rerun: full refresh (TRUNCATE + INSERT).
+-- Lineage: many bronze records feed one row, so bronze_lineage is a JSONB array.
 TRUNCATE gold.inventory_value_by_category;
 
+-- jsonb_agg(DISTINCT ...): the set of bronze records behind the aggregate.
 INSERT INTO gold.inventory_value_by_category (
     store_name, product_category, product_count, variation_count,
-    total_inventory, inventory_value, avg_price
+    total_inventory, inventory_value, avg_price, bronze_lineage
 )
 SELECT s.store_name,
        p.category,
@@ -11,7 +14,9 @@ SELECT s.store_name,
        COUNT(*),
        SUM(v.inventory),
        SUM(v.inventory * v.price),
-       ROUND(AVG(v.price), 2)
+       ROUND(AVG(v.price), 2),
+       jsonb_agg(DISTINCT jsonb_build_object(
+           'logical_date', v.bronze_logical_date, 'record_index', v.bronze_record_index))
 FROM silver.product_variations v
 JOIN silver.store_products p USING (product_id)
 JOIN silver.stores s USING (store_id)
