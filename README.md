@@ -20,6 +20,64 @@ make psql      # open the warehouse
 - **Warehouse:** `postgresql://warehouse:warehouse@localhost:5433/warehouse`
 - Ports busy? Set `AIRFLOW_PORT` / `WAREHOUSE_PORT` in `.env` and rerun `make up`.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph SRC["Sources"]
+        direction TB
+        O[/"orders.json<br/>order_service"/]
+        P[/"products.json<br/>catalog_service"/]
+    end
+    subgraph BZ["Bronze · immutable"]
+        direction TB
+        BA[("bronze.arrival<br/>1 row per delivery<br/>sha256 · schema · status")]
+        BR[("bronze.record<br/>raw JSONB")]
+        QZ[/"data/quarantine"/]
+    end
+    subgraph SV["Silver · 3NF + SCD-2"]
+        direction TB
+        S1[("customers · products<br/>SCD-2 history")]
+        S2[("orders · order_items<br/>categories · prices")]
+        S3[("rejected_record<br/>parked items")]
+    end
+    subgraph GD["Gold · per release"]
+        direction TB
+        G1[("order_lines<br/>daily_sales_by_category<br/>customer_summary<br/>product_performance")]
+        GT[("v_trace_* lineage")]
+    end
+    subgraph CO["Consumers"]
+        direction TB
+        A[["analytics.*"]]
+        F[["finance.*"]]
+    end
+    OPS[("ops.release · ops.destination<br/>ops.quality_issue")]
+
+    O --> BA
+    P --> BA
+    BA --> BR
+    BA -. invalid .-> QZ
+    BR --> S1
+    BR --> S2
+    BR -. bad record .-> S3
+    S1 --> G1
+    S2 --> G1
+    G1 --- GT
+    G1 --> A
+    G1 --> F
+    OPS -. active release .-> A
+    OPS -. active release .-> F
+
+    classDef ok fill:#e3f6e8,stroke:#2e7d32
+    classDef warn fill:#fff4d6,stroke:#c08a00
+    classDef bad fill:#fde2e1,stroke:#c62828
+    class A,F ok
+    class S3 warn
+    class QZ bad
+```
+
+Airflow (LocalExecutor) orchestrates every step; Airflow's metadata DB and the warehouse are separate Postgres instances.
+
 ## How a run flows
 
 ```mermaid
