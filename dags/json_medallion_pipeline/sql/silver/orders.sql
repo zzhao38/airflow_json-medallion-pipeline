@@ -3,7 +3,8 @@
 -- Rerun: unchanged customers get no new version; orders are upserted (only a real change rewrites
 --        a row); items are replaced per order; rejects and quality issues are insert-once.
 -- Lineage: bronze_* columns carry the order record behind every row (items inherit their order's).
--- valid_from is the delivery's arrived_at (not now()), so a replay of the same delivery is deterministic.
+-- Customer valid_from uses customer.effective_at; legacy records fall back to order.ordered_at. Timelines
+-- are rebuilt by effective time, so late changes can split an existing SCD-2 interval.
 --
 -- Business rules live here (not in the JSON Schema) so one bad order rejects ONE record, not the file.
 -- A rejected order (whole order, never a single item) gets a silver.rejected_record row and an ERROR
@@ -14,8 +15,8 @@
 --   4. an order_item_id already belongs to a DIFFERENT order in silver
 --   5. ordered_at (UTC date) is after the batch's logical date (future-dated)
 --   6. the order_id appears more than once with DIFFERENT content: ALL versions are rejected
--- WARN only (order kept): identical duplicates collapse to one; a customer_id seen with several names
--- (last record wins); an item whose product has no CURRENT silver.products row is PARKED -- it stays in
+-- WARN only (order kept): identical duplicates collapse to one; different names for one customer at the
+-- same effective time use the last record; an item whose product has no CURRENT silver.products row is PARKED -- it stays in
 -- silver (view silver.v_parked_order_items) but is excluded from gold until the product arrives.
 
 -- Every record of the latest accepted delivery for this logical date.
@@ -39,6 +40,8 @@ SELECT DISTINCT ON (order_id)
        order_id,
        payload -> 'customer' ->> 'customer_id'                             AS customer_id,
        payload -> 'customer' ->> 'name'                                    AS customer_name,
+       COALESCE((payload -> 'customer' ->> 'effective_at')::TIMESTAMPTZ,
+                (payload ->> 'ordered_at')::TIMESTAMPTZ)                   AS customer_effective_at,
        (payload ->> 'ordered_at')::TIMESTAMPTZ                             AS ordered_at,
        ((payload ->> 'ordered_at')::TIMESTAMPTZ AT TIME ZONE 'UTC')::DATE  AS order_date,
        payload -> 'shipping' ->> 'city'                                    AS ship_city,
@@ -144,45 +147,92 @@ WHERE NOT EXISTS (SELECT 1 FROM ops.quality_issue q
                     AND q.severity = 'ERROR' AND q.reason = format('order %s rejected: %s', x.order_id, x.reason));
 
 -- Customers come from every non-conflicting order record, rejected orders included (the customer
--- exists even if one order is bad). Last record wins for a customer seen with different names.
+-- exists even if one order is bad). Same-time name conflicts warn; different effective times form history.
 CREATE TEMP TABLE batch_customers ON COMMIT DROP AS
-SELECT s.*, md5(jsonb_build_array(s.name)::TEXT) AS row_hash
-FROM (
-    SELECT DISTINCT ON (customer_id)
-           customer_id, customer_name AS name, arrival_id, record_index, delivered_at
-    FROM batch_orders
-    ORDER BY customer_id, record_index DESC
-) s;
+SELECT DISTINCT ON (customer_id, customer_effective_at)
+       customer_id, customer_name AS name, customer_effective_at AS valid_from,
+       md5(jsonb_build_array(customer_name)::TEXT) AS row_hash,
+       arrival_id, record_index
+FROM batch_orders
+ORDER BY customer_id, customer_effective_at, record_index DESC;
 
--- WARN (once per run + customer): the same customer_id arrived with different names.
+-- WARN only when names conflict at the SAME effective instant; different times are ordinary history.
 INSERT INTO ops.quality_issue (dag_run_id, logical_date, layer, source_or_model, severity, reason, arrival_id)
 SELECT '{{ run_id }}', '{{ ds }}'::DATE, 'silver', 'orders', 'WARN', c.reason, c.arrival_id
 FROM (
-    SELECT format('customer %s has %s names in batch (%s); last one kept', customer_id,
-                  COUNT(DISTINCT customer_name), string_agg(DISTINCT customer_name, ', ')) AS reason,
+    SELECT format('customer %s has %s names in batch at effective_at %s (%s); last record kept',
+                  customer_id, COUNT(DISTINCT customer_name), customer_effective_at,
+                  string_agg(DISTINCT customer_name, ', ')) AS reason,
            MIN(arrival_id) AS arrival_id
     FROM batch_orders
-    GROUP BY customer_id
+    GROUP BY customer_id, customer_effective_at
     HAVING COUNT(DISTINCT customer_name) > 1
 ) c
 WHERE NOT EXISTS (SELECT 1 FROM ops.quality_issue q
                   WHERE q.dag_run_id = '{{ run_id }}' AND q.layer = 'silver' AND q.source_or_model = 'orders'
                     AND q.severity = 'WARN' AND q.reason = c.reason);
 
-CREATE TEMP TABLE changed_customers ON COMMIT DROP AS
-SELECT b.*
-FROM batch_customers b
-LEFT JOIN silver.customers c ON c.customer_id = b.customer_id AND c.is_current
-WHERE c.customer_id IS NULL OR c.row_hash <> b.row_hash;
+-- Merge known versions with new observations, preferring the latest delivery at an identical
+-- effective time. Remove adjacent versions with identical attributes after inserting late events.
+CREATE TEMP TABLE customer_timeline_candidates ON COMMIT DROP AS
+SELECT c.customer_id, c.name, c.row_hash, c.valid_from,
+       c.bronze_arrival_id, c.bronze_record_index, FALSE AS incoming
+FROM silver.customers c
+WHERE EXISTS (SELECT 1 FROM batch_customers b WHERE b.customer_id = c.customer_id)
+UNION ALL
+SELECT b.customer_id, b.name, b.row_hash, b.valid_from,
+       b.arrival_id, b.record_index, TRUE AS incoming
+FROM batch_customers b;
+
+CREATE TEMP TABLE customer_timeline_latest ON COMMIT DROP AS
+SELECT DISTINCT ON (customer_id, valid_from)
+       customer_id, name, row_hash, valid_from, bronze_arrival_id, bronze_record_index
+FROM customer_timeline_candidates
+ORDER BY customer_id, valid_from, incoming DESC, bronze_arrival_id DESC, bronze_record_index DESC;
+
+CREATE TEMP TABLE customer_timeline ON COMMIT DROP AS
+SELECT customer_id, name, row_hash, valid_from, bronze_arrival_id, bronze_record_index
+FROM (
+    SELECT t.*,
+           LAG(row_hash) OVER (PARTITION BY customer_id ORDER BY valid_from) AS previous_hash
+    FROM customer_timeline_latest t
+) ordered
+WHERE previous_hash IS DISTINCT FROM row_hash;
+
+-- Temporarily close touched rows so the one-current-row index remains valid during the rebuild.
+UPDATE silver.customers c
+SET valid_to = COALESCE(c.valid_to, c.valid_from), is_current = FALSE
+WHERE EXISTS (SELECT 1 FROM batch_customers b WHERE b.customer_id = c.customer_id);
+
+DELETE FROM silver.customers c
+WHERE EXISTS (SELECT 1 FROM batch_customers b WHERE b.customer_id = c.customer_id)
+  AND NOT EXISTS (SELECT 1 FROM customer_timeline t
+                  WHERE t.customer_id = c.customer_id AND t.valid_from = c.valid_from);
 
 UPDATE silver.customers c
-SET valid_to = ch.delivered_at, is_current = FALSE
-FROM changed_customers ch
-WHERE c.customer_id = ch.customer_id AND c.is_current;
+SET name = t.name, row_hash = t.row_hash,
+    bronze_arrival_id = t.bronze_arrival_id, bronze_record_index = t.bronze_record_index
+FROM customer_timeline t
+WHERE c.customer_id = t.customer_id AND c.valid_from = t.valid_from;
 
-INSERT INTO silver.customers (customer_id, name, row_hash, valid_from, bronze_arrival_id, bronze_record_index)
-SELECT customer_id, name, row_hash, delivered_at, arrival_id, record_index
-FROM changed_customers;
+INSERT INTO silver.customers
+    (customer_id, name, row_hash, valid_from, valid_to, is_current, bronze_arrival_id, bronze_record_index)
+SELECT t.customer_id, t.name, t.row_hash, t.valid_from, t.valid_from, FALSE,
+       t.bronze_arrival_id, t.bronze_record_index
+FROM customer_timeline t
+WHERE NOT EXISTS (SELECT 1 FROM silver.customers c
+                  WHERE c.customer_id = t.customer_id AND c.valid_from = t.valid_from);
+
+WITH intervals AS (
+    SELECT customer_sk,
+           LEAD(valid_from) OVER (PARTITION BY customer_id ORDER BY valid_from) AS next_valid_from
+    FROM silver.customers c
+    WHERE EXISTS (SELECT 1 FROM batch_customers b WHERE b.customer_id = c.customer_id)
+)
+UPDATE silver.customers c
+SET valid_to = i.next_valid_from, is_current = (i.next_valid_from IS NULL)
+FROM intervals i
+WHERE c.customer_sk = i.customer_sk;
 
 -- Valid orders: upsert; a row is rewritten only when something actually changed.
 CREATE TEMP TABLE valid_orders ON COMMIT DROP AS
