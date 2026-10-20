@@ -111,7 +111,15 @@ flowchart TB
 - **Silver** is typed 3NF; `customers` and `products` keep full history (SCD-2). Customer versions use `customer.effective_at` (legacy records fall back to `ordered_at`), so late corrections can be inserted into the right historical interval; Gold order lines resolve the customer as of the order time. Product versions use delivery time. A record that breaks a business rule (e.g. `quantity <= 0`) is rejected on its own; the rest of the file loads.
 - **Gold** is rebuilt as a new release each run. `publish_release` flips one pointer, so consumers switch atomically or not at all.
 
-The DAG is `json_medallion_pipeline` (weekdays 02:00 UTC, `catchup=False`); SQL lives in `dags/json_medallion_pipeline/sql/`, contracts in `schemas/`.
+The DAG is `json_medallion_pipeline` (weekdays 02:00 UTC, `catchup=False`). The DAG file reads top to bottom: a header listing target and source tables, a constants block, one named operator per task, and every dependency wired in one block at the end. The Python logic (file checks, bronze ingest, release publish/hold) lives in `pipeline_helpers.py`.
+
+```
+dag_run_start → setup.create_{bronze,ops,silver,gold}_tables → setup.create_{trace,consumer}_views
+  → bronze.ingest_* → silver.transform_* → silver.check_*        (orders waits for check_products)
+  → gold.build_* (4 in parallel) → gold.check_reconciliation → publish_release → dag_finished
+```
+
+To change a query, edit the `.sql` file named on its task (`sql/<layer>/<name>.sql`); data checks are in `sql/checks/`, file contracts in `schemas/`.
 
 ## What to look at
 
@@ -135,13 +143,21 @@ cp data/samples/orders.json data/landing/orders.json && make trigger        # re
 
 Every scenario (file-level, record-level, warning-only) is listed with its expected outcome in `data/samples/scenarios/manifest.json`.
 
+To rebuild the warehouse from scratch (e.g. after changing how silver history is derived), drop its schemas; the setup tasks recreate them on the next run:
+
+```bash
+docker compose exec warehouse psql -U warehouse -d warehouse \
+  -c "DROP SCHEMA IF EXISTS analytics, finance, gold, silver, ops, bronze CASCADE"
+make trigger
+```
+
 ## Design decisions
 
 - **Immutable bronze:** a corrected file is a new arrival; identical bytes are a `DUPLICATE`, so reruns change nothing.
 - **Contract at the door, rules per record:** JSON Schema quarantines a broken file; business rules in silver SQL reject only the bad record.
 - **Release gating:** gold is built, reconciled against silver, then published by flipping `ops.destination`; a failed build never reaches consumers and rollback is a pointer change.
 - **History and lineage:** hash-gated SCD-2 in silver; every gold row resolves to its bronze record via `gold.v_trace_*`.
-- **Explicit over clever:** one readable DAG file with every task written out, SQL in files, `NUMERIC` money.
+- **Explicit over clever:** one named operator per task, each pointing at its own SQL file; Python logic kept in a plain helper module; `NUMERIC` money.
 
 ## Tests
 
@@ -154,7 +170,11 @@ make test-integration   # end-to-end SQL in a throwaway warehouse_test database
 ## Layout
 
 ```
-dags/json_medallion_pipeline/   # the DAG, schemas/ (JSON Schema), sql/ (bronze, silver, gold, ops, checks)
+dags/json_medallion_pipeline/
+  json_medallion_pipeline.py    # the DAG: header, constants, tasks, dependencies
+  pipeline_helpers.py           # plain-Python logic the tasks call (not parsed as a DAG; see .airflowignore)
+  sql/                          # bronze, silver, gold, ops DDL/transforms + checks/
+  schemas/                      # JSON Schema contracts per source
 data/samples/                   # input files and scenarios/ (one file per failure case + manifest.json)
 tests/                          # unit, DAG integrity, scenario and integration tests
 docker-compose.yml, Dockerfile  # Airflow (LocalExecutor), metadata Postgres, warehouse Postgres

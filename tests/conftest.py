@@ -43,8 +43,8 @@ def sql_dir() -> Path:
 
 @pytest.fixture(scope="session")
 def pipeline_module():
-    """The DAG module (helpers like land_file / bronze_rows)."""
-    return load_dag_module(PIPELINE_DIR / "json_medallion_pipeline.py", "json_medallion_pipeline_module")
+    """pipeline_helpers.py: the plain-Python logic the DAG calls (inspect_file, ingest_source, releases)."""
+    return load_dag_module(PIPELINE_DIR / "pipeline_helpers.py", "json_medallion_pipeline_helpers")
 
 
 @pytest.fixture(scope="session")
