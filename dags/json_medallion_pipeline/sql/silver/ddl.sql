@@ -1,4 +1,6 @@
 -- Silver: typed, normalized entities. Parents are SCD-2 (full history); children are current-state.
+-- Customer valid_from is source-effective time (or ordered_at for legacy records); product valid_from
+-- remains delivery time. Late customer events can be inserted between existing versions.
 -- Grain: one row per VERSION of a parent (surrogate key <entity>_sk); children and facts are keyed
 --        by their natural key and describe the current state only.
 -- Rerun: a parent only gets a new version when row_hash changes, so replaying the same arrival
@@ -21,6 +23,7 @@ CREATE TABLE IF NOT EXISTS silver.customers (
     FOREIGN KEY (bronze_arrival_id, bronze_record_index) REFERENCES bronze.record
 );
 CREATE UNIQUE INDEX IF NOT EXISTS customers_one_current ON silver.customers (customer_id) WHERE is_current;
+CREATE UNIQUE INDEX IF NOT EXISTS customers_one_effective_start ON silver.customers (customer_id, valid_from);
 
 -- Facts: one row per valid order (upsert on order_id). Rejected orders never land here.
 CREATE TABLE IF NOT EXISTS silver.orders (

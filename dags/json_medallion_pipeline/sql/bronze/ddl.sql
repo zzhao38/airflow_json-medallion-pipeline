@@ -40,7 +40,8 @@ CREATE INDEX IF NOT EXISTS record_payload_gin ON bronze.record USING GIN (payloa
 
 -- The arrival silver must read for each (source, logical_date): the latest delivery that was not
 -- quarantined. A DUPLICATE resolves to the arrival it duplicates, so a re-delivery reads the same
--- records. delivered_at is when that latest delivery happened (used as the SCD-2 valid_from).
+-- records. delivered_at is when that latest delivery happened (product SCD-2 uses it; customer
+-- SCD-2 uses customer.effective_at, falling back to ordered_at for legacy records).
 CREATE OR REPLACE VIEW bronze.v_latest_accepted AS
 SELECT DISTINCT ON (source, logical_date)
        source,

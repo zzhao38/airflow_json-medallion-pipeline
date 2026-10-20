@@ -10,5 +10,7 @@ SELECT
                                                                                AS every_order_has_items,
     NOT EXISTS (SELECT 1 FROM silver.orders o
                 WHERE NOT EXISTS (SELECT 1 FROM silver.customers c
-                                  WHERE c.customer_id = o.customer_id AND c.is_current))
+                                  WHERE c.customer_id = o.customer_id
+                                    AND c.valid_from <= o.ordered_at
+                                    AND (c.valid_to IS NULL OR o.ordered_at < c.valid_to)))
                                                                                AS every_order_has_a_customer;

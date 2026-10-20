@@ -108,7 +108,7 @@ flowchart TB
 ```
 
 - **Bronze** is append-only: one `bronze.arrival` row per delivery (SHA-256, schema version, `batch_id`, status) and the raw records in `bronze.record`.
-- **Silver** is typed 3NF; `customers` and `products` keep full history (SCD-2). A record that breaks a business rule (e.g. `quantity <= 0`) is rejected on its own; the rest of the file loads.
+- **Silver** is typed 3NF; `customers` and `products` keep full history (SCD-2). Customer versions use `customer.effective_at` (legacy records fall back to `ordered_at`), so late corrections can be inserted into the right historical interval; Gold order lines resolve the customer as of the order time. Product versions use delivery time. A record that breaks a business rule (e.g. `quantity <= 0`) is rejected on its own; the rest of the file loads.
 - **Gold** is rebuilt as a new release each run. `publish_release` flips one pointer, so consumers switch atomically or not at all.
 
 The DAG is `json_medallion_pipeline` (weekdays 02:00 UTC, `catchup=False`); SQL lives in `dags/json_medallion_pipeline/sql/`, contracts in `schemas/`.

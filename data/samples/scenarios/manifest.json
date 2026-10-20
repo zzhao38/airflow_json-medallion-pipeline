@@ -415,6 +415,34 @@
       "description": "Incompatible upstream change (renamed or retyped field): files quarantine against v1 until a v2 schema is rolled out.",
       "where": "bronze.arrival QUARANTINED with the JSON path; schemas/ folder",
       "talking_point": "Breaking change means a new schemas/<source>.v2.json and a versioned rollout; v1 files keep validating against v1."
+    },
+    {
+      "name": "orders_customer_change",
+      "file": "orders_customer_change.json",
+      "source": "orders",
+      "layer": "silver",
+      "description": "C001's name changes to Jordan Chen effective 2026-09-10.",
+      "bronze": {
+        "status": "ACCEPTED"
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "O5101"
+      ]
+    },
+    {
+      "name": "orders_customer_late_arrival",
+      "file": "orders_customer_late_arrival.json",
+      "source": "orders",
+      "layer": "silver",
+      "description": "A later delivery reports C001's corrected name effective 2026-09-05, before the known 2026-09-10 version.",
+      "bronze": {
+        "status": "ACCEPTED"
+      },
+      "release": "PUBLISHED",
+      "loaded": [
+        "O5102"
+      ]
     }
   ]
 }

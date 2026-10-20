@@ -257,6 +257,36 @@ def test_price_change_creates_a_new_scd2_version_and_a_new_release(env):
                       "AND product_id = 'P100'", (first.release_id,)) == [(Decimal("0.00"),)]
 
 
+def test_late_customer_change_splits_scd2_history_and_gold_uses_effective_time(env):
+    first = run_pipeline(env, RUN_1)
+    assert first.status == "PUBLISHED"
+
+    use_scenario(env, "orders_customer_change.json", "orders.json")
+    second = run_pipeline(env, RUN_2)
+    assert second.status == "PUBLISHED"
+
+    # This event arrives after the Sep 10 version but is effective on Sep 5.
+    use_scenario(env, "orders_customer_late_arrival.json", "orders.json")
+    third = run_pipeline(env, RUN_3)
+    assert third.status == "PUBLISHED"
+
+    versions = fetch(env, "SELECT name, (valid_from AT TIME ZONE 'UTC')::date::text, "
+                      "(valid_to AT TIME ZONE 'UTC')::date::text, is_current "
+                      "FROM silver.customers WHERE customer_id = 'C001' ORDER BY valid_from")
+    assert versions == [
+        ("Jordan Lee", "2026-09-01", "2026-09-05", False),
+        ("Jordan Lee (corrected)", "2026-09-05", "2026-09-10", False),
+        ("Jordan Chen", "2026-09-10", None, True),
+    ]
+
+    gold_names = fetch(env, "SELECT order_id, customer_name FROM analytics.order_lines "
+                            "WHERE order_id IN ('O5101', 'O5102') ORDER BY order_id")
+    assert gold_names == [
+        ("O5101", "Jordan Chen"),
+        ("O5102", "Jordan Lee (corrected)"),
+    ]
+
+
 def test_redelivered_batch_id_with_different_content_warns(env):
     run_pipeline(env, RUN_1)
     edit_landing(env, "products.json", lambda doc: doc["records"][0]["prices"][0].update(amount=60))

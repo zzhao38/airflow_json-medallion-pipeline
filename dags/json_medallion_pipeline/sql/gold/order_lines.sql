@@ -1,4 +1,5 @@
--- gold.order_lines: one row per silver order item, enriched with customer, product and category.
+-- gold.order_lines: one row per silver order item, enriched with the customer version valid at ordered_at,
+-- plus the current product and category.
 -- Grain/key: (release_id, order_item_id). Reads silver only (never another gold model), so the four
 -- gold builds can run in parallel and the reconciliation check stays independent of them.
 -- Rerun: delete + insert for THIS release_id only; other releases are never touched.
@@ -23,6 +24,8 @@ SELECT {{ release_id }},
        i.bronze_arrival_id, i.bronze_record_index
 FROM silver.order_items i
 JOIN silver.orders o     ON o.order_id = i.order_id
-JOIN silver.customers c  ON c.customer_id = o.customer_id AND c.is_current
+JOIN silver.customers c  ON c.customer_id = o.customer_id
+                          AND c.valid_from <= o.ordered_at
+                          AND (c.valid_to IS NULL OR o.ordered_at < c.valid_to)
 JOIN silver.products p    ON p.product_id = i.product_id AND p.is_current
 JOIN silver.categories cat ON cat.category_id = p.category_id;

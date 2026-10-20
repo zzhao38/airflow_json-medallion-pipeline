@@ -1,0 +1,28 @@
+{
+  "source": "order_service",
+  "batch_id": "customer-late-arrival-2026-09-05",
+  "records": [
+    {
+      "order_id": "O5102",
+      "ordered_at": "2026-09-07T12:00:00Z",
+      "customer": {
+        "customer_id": "C001",
+        "name": "Jordan Lee (corrected)",
+        "effective_at": "2026-09-05T00:00:00Z"
+      },
+      "shipping": {
+        "city": "Chicago",
+        "state": "IL",
+        "method": "ground"
+      },
+      "items": [
+        {
+          "order_item_id": "OI-5102-1",
+          "product_id": "P100",
+          "quantity": 1,
+          "unit_price": 49.99
+        }
+      ]
+    }
+  ]
+}
